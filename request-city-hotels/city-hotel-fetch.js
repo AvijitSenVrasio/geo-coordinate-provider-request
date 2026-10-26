@@ -14,7 +14,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
 
 const CITY_COLLECTION = "city_hotel_list";
 const META_COLLECTION = "meta_data";
-const FAILED_LOG_COLLECTION = "meta_data_request_log";
+const ERROR_LOG_COLLECTION = "error_logs";
 
 const CHECKPOINT_ID = "city_hotel_list_checkpoint";
 
@@ -216,7 +216,7 @@ async function main() {
         const db = client.db(DB_NAME);
         const cityCollection = db.collection(CITY_COLLECTION);
         const metaCollection = db.collection(META_COLLECTION);
-        const failedLogCollection = db.collection(FAILED_LOG_COLLECTION);
+        const failedLogCollection = db.collection(ERROR_LOG_COLLECTION);
 
         console.log(`Connected to MongoDB: ${DB_NAME}`);
         console.log(`Target API URL: ${API_URL}`);
@@ -359,7 +359,7 @@ async function main() {
                     ordered: true,
                 });
                 console.log(
-                    `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
+                    `Saved ${failedLogs.length} failed request(s) to ${ERROR_LOG_COLLECTION}.`,
                 );
             }
 

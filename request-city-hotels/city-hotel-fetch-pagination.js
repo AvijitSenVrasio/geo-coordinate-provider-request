@@ -24,11 +24,20 @@ const MAX_PAGES_PER_CITY = Number(process.env.MAX_PAGES_PER_CITY || 1000);
 // Optional pause between pages of the same city (ms).
 const PAGE_DELAY_MS = Number(process.env.PAGE_DELAY_MS || 0);
 
+// ─── Collections ────────────────────────────────────────────────────────────
 const CITY_COLLECTION = "city_hotel_list";
 const META_COLLECTION = "meta_data";
-const FAILED_LOG_COLLECTION = "meta_data_request_log";
+const REQUEST_LOG_COLLECTION = "meta_data_request_log"; // per-city / per-round page log
+const ERROR_LOG_COLLECTION = "error_logs"; // every failed request
 
+// Document in meta_data that stores the current round number.
 const CHECKPOINT_ID = "city_hotel_list_checkpoint";
+
+// Start a brand-new round (round number + 1) with:
+//   NEW_ROUND=true node script.js      or      node script.js --new-round
+const START_NEW_ROUND =
+    String(process.env.NEW_ROUND || "").toLowerCase() === "true" ||
+    process.argv.includes("--new-round");
 
 const DEFAULT_PAYLOAD = {
     radius: 10,
@@ -102,6 +111,10 @@ function buildPayload(city) {
         longitude,
         locationName,
     };
+}
+
+function getCountry(city) {
+    return city.country || city.country_name || city.countryName || null;
 }
 
 function parseResponseBody(text) {
@@ -231,10 +244,55 @@ async function hitApiWithRateLimitRetry(payload, cityName) {
     return result;
 }
 
-function buildFailureLog({ city, payload, result, page }) {
-    return {
+// ─── Round handling ─────────────────────────────────────────────────────────
+
+/**
+ * Reads the current round from meta_data.
+ *  - No round stored yet           → starts at 1.
+ *  - NEW_ROUND=true / --new-round  → previous round + 1.
+ *  - Otherwise                     → continues the stored round.
+ */
+async function resolveCurrentRound(metaCollection) {
+    const checkpoint = await metaCollection.findOne({ _id: CHECKPOINT_ID });
+    const stored = Number(checkpoint?.currentRound);
+    const hasValidRound = Number.isInteger(stored) && stored >= 1;
+
+    if (!hasValidRound) {
+        await metaCollection.updateOne(
+            { _id: CHECKPOINT_ID },
+            { $set: { currentRound: 1, roundStartedAt: new Date() } },
+            { upsert: true },
+        );
+        console.log("🔁 No round found in meta_data. Starting at round 1.");
+        return 1;
+    }
+
+    if (START_NEW_ROUND) {
+        const next = stored + 1;
+        await metaCollection.updateOne(
+            { _id: CHECKPOINT_ID },
+            {
+                $set: { currentRound: next, roundStartedAt: new Date() },
+                $unset: { lastProcessedId: "" },
+            },
+        );
+        console.log(`🔁 NEW ROUND requested: round ${stored} → round ${next}.`);
+        return next;
+    }
+
+    console.log(`🔁 Continuing round ${stored}.`);
+    return stored;
+}
+
+// ─── Logging helpers ────────────────────────────────────────────────────────
+
+/** Inserts into error_logs and returns the new error id. */
+async function logError(ctx, { city, payload, result, page }) {
+    const doc = {
         recordId: city._id,
         city: city.city,
+        country: getCountry(city),
+        round: ctx.round,
         page,
         request: payload,
         response: result.response ?? null,
@@ -247,7 +305,48 @@ function buildFailureLog({ city, payload, result, page }) {
         targetUrl: API_URL,
         createdAt: new Date(),
     };
+
+    const inserted = await ctx.errorLogCollection.insertOne(doc);
+    return inserted.insertedId;
 }
+
+/** Creates (or resets) this city's request-log doc for the current round. */
+async function initRequestLog(ctx, city) {
+    await ctx.requestLogCollection.updateOne(
+        { cityId: city._id, currentRound: ctx.round },
+        {
+            $set: {
+                city: city.city,
+                country: getCountry(city),
+                request: {},
+                totalHit: 0,
+                updatedAt: new Date(),
+            },
+            $setOnInsert: { createdAt: new Date() },
+        },
+        { upsert: true },
+    );
+}
+
+/** Writes hit<page> into the request-log doc and sets totalHit. */
+async function recordHit(ctx, city, page, hitData) {
+    await ctx.requestLogCollection.updateOne(
+        { cityId: city._id, currentRound: ctx.round },
+        {
+            $set: {
+                city: city.city,
+                country: getCountry(city),
+                [`request.hit${page}`]: { ...hitData, round: ctx.round },
+                totalHit: page,
+                updatedAt: new Date(),
+            },
+            $setOnInsert: { createdAt: new Date() },
+        },
+        { upsert: true },
+    );
+}
+
+// ─── Per-city pagination ────────────────────────────────────────────────────
 
 /**
  * Pages through ONE city until it is exhausted.
@@ -263,25 +362,30 @@ function buildFailureLog({ city, payload, result, page }) {
  *
  * Stops (failure) when a request fails (non-2xx, timeout, retries exhausted)
  * or MAX_PAGES_PER_CITY is reached.
+ *
+ * Every page is written to meta_data_request_log; every failure is written
+ * to error_logs and its id is referenced from the failed hit.
  */
-async function fetchAllPagesForCity(city, tag) {
+async function fetchAllPagesForCity(ctx, city, tag) {
     const summary = {
         success: false,
         pages: 0,
         totalHotels: 0,
         stopReason: null,
-        failureLog: null,
+        errorId: null,
     };
+
+    await initRequestLog(ctx, city);
 
     let basePayload;
     try {
         basePayload = buildPayload(city);
     } catch (error) {
         summary.stopReason = "invalid city data";
-        summary.failureLog = buildFailureLog({
+        summary.errorId = await logError(ctx, {
             city,
             payload: null,
-            page: 0,
+            page: 1,
             result: {
                 response: null,
                 statusCode: null,
@@ -290,6 +394,10 @@ async function fetchAllPagesForCity(city, tag) {
                 errorCode: null,
                 durationMs: 0,
             },
+        });
+        await recordHit(ctx, city, 1, {
+            success: false,
+            error: summary.errorId,
         });
         return summary;
     }
@@ -325,11 +433,15 @@ async function fetchAllPagesForCity(city, tag) {
                     `HTTP ${result.statusCode ?? "N/A"} | ${result.error}`,
             );
             summary.stopReason = `request failed on page ${page}`;
-            summary.failureLog = buildFailureLog({
+            summary.errorId = await logError(ctx, {
                 city,
                 payload,
                 result,
                 page,
+            });
+            await recordHit(ctx, city, page, {
+                success: false,
+                error: summary.errorId,
             });
             return summary;
         }
@@ -339,6 +451,11 @@ async function fetchAllPagesForCity(city, tag) {
         const data = result.response?.data;
         const hotelCount = Array.isArray(data?.hotels) ? data.hotels.length : 0;
         summary.totalHotels += hotelCount;
+
+        await recordHit(ctx, city, page, {
+            success: true,
+            totalHotel: hotelCount,
+        });
 
         console.log(
             `   ↳ ${hotelCount} hotel(s) on page ${page} ` +
@@ -389,9 +506,9 @@ async function fetchAllPagesForCity(city, tag) {
         }
     }
 
-    // Hit the safety cap: treat as incomplete so it is visible in the log.
+    // Hit the safety cap: treat as incomplete so it is visible in error_logs.
     summary.stopReason = `MAX_PAGES_PER_CITY (${MAX_PAGES_PER_CITY}) reached`;
-    summary.failureLog = buildFailureLog({
+    summary.errorId = await logError(ctx, {
         city,
         payload: null,
         page: MAX_PAGES_PER_CITY,
@@ -454,7 +571,8 @@ async function main() {
         const db = client.db(DB_NAME);
         const cityCollection = db.collection(CITY_COLLECTION);
         const metaCollection = db.collection(META_COLLECTION);
-        const failedLogCollection = db.collection(FAILED_LOG_COLLECTION);
+        const requestLogCollection = db.collection(REQUEST_LOG_COLLECTION);
+        const errorLogCollection = db.collection(ERROR_LOG_COLLECTION);
 
         console.log(`Connected to MongoDB: ${DB_NAME}`);
         console.log(`Target API URL: ${API_URL}`);
@@ -465,6 +583,15 @@ async function main() {
             `Pagination: stop on empty page or ${MAX_CONSECUTIVE_LOW_PAGES} consecutive pages with < ${MIN_RECORDS_PER_PAGE} hotels`,
         );
 
+        const round = await resolveCurrentRound(metaCollection);
+
+        const ctx = {
+            round,
+            cityCollection,
+            requestLogCollection,
+            errorLogCollection,
+        };
+
         // ─── Grand totals across all batches ───────────────────────────────
         let batchNumber = 0;
         let grandTotalFetched = 0;
@@ -473,44 +600,36 @@ async function main() {
         let grandTotalPages = 0;
         let grandTotalHotels = 0;
 
-        // ─── Outer loop: keep going until no unhitted records remain ───────
+        // ─── Outer loop: keep going until every city has been requested in
+        //     this round. A city is "done for this round" once its
+        //     currentRound field equals the round stored in meta_data. ──────
         while (true) {
             batchNumber += 1;
 
-            // Read the current checkpoint (re-read each iteration so it
-            // reflects what was written at the end of the previous batch).
-            const checkpoint = await metaCollection.findOne({
-                _id: CHECKPOINT_ID,
-            });
-            const lastId = checkpoint?.lastProcessedId;
-
-            const filter = { hitted: { $ne: 1 } };
-            if (lastId) {
-                filter._id = { $gt: lastId };
-            }
-
-            // Fetch next batch in ascending _id order.
             const cities = await cityCollection
-                .find(filter)
+                .find({ currentRound: { $ne: round } })
                 .sort({ _id: 1 })
                 .limit(BATCH_SIZE)
                 .toArray();
 
             if (cities.length === 0) {
                 console.log(
-                    "\n✅ No more eligible records found. All cities processed!",
+                    `\n✅ Round ${round} complete. Every city has been requested in this round.`,
+                );
+                console.log(
+                    "   To start another full pass run with NEW_ROUND=true (or --new-round).",
                 );
                 break;
             }
 
             console.log(
                 `\n${"═".repeat(42)}\n` +
-                    `BATCH ${batchNumber} — ${cities.length} cities to process\n` +
+                    `ROUND ${round} | BATCH ${batchNumber} — ${cities.length} cities to process\n` +
                     `${"═".repeat(42)}`,
             );
 
-            const successfulCities = []; // { _id, pages, totalHotels }
-            const failedLogs = [];
+            let successCount = 0;
+            let failedCount = 0;
             let batchPages = 0;
             let batchHotels = 0;
 
@@ -518,65 +637,47 @@ async function main() {
             //     before the next city starts ───────────────────────────────
             for (let i = 0; i < cities.length; i++) {
                 const city = cities[i];
-                const tag = `[Batch ${batchNumber}][${i + 1}/${cities.length}]`;
+                const tag = `[R${round}][Batch ${batchNumber}][${i + 1}/${cities.length}]`;
 
                 console.log(`\n${tag} Starting city: ${city.city}`);
 
-                const summary = await fetchAllPagesForCity(city, tag);
+                const summary = await fetchAllPagesForCity(ctx, city, tag);
 
                 batchPages += summary.pages;
                 batchHotels += summary.totalHotels;
 
                 if (summary.success) {
-                    successfulCities.push({
-                        _id: city._id,
-                        pages: summary.pages,
-                        totalHotels: summary.totalHotels,
-                    });
+                    successCount += 1;
                     console.log(
                         `SUCCESS | ${city.city} | ${summary.pages} page(s) | ` +
                             `${summary.totalHotels} hotel(s) | stop: ${summary.stopReason}`,
                     );
                 } else {
+                    failedCount += 1;
                     console.error(
                         `CITY FAILED | ${city.city} | after ${summary.pages} successful page(s) | ${summary.stopReason}`,
                     );
-                    if (summary.failureLog) {
-                        failedLogs.push(summary.failureLog);
-                    }
                 }
-            }
 
-            // ─── Persist batch results ──────────────────────────────────────
-
-            if (failedLogs.length > 0) {
-                await failedLogCollection.insertMany(failedLogs, {
-                    ordered: true,
-                });
-                console.log(
-                    `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
-                );
-            }
-
-            if (successfulCities.length > 0) {
-                await cityCollection.bulkWrite(
-                    successfulCities.map(({ _id, pages, totalHotels }) => ({
-                        updateOne: {
-                            filter: { _id },
-                            update: {
-                                $set: {
-                                    hitted: 1,
-                                    hittedAt: new Date(),
-                                    pagesFetched: pages,
-                                    hotelsFetched: totalHotels,
-                                },
-                            },
+                // Stamp the city with the current round (success OR failure)
+                // so it is not picked up again during this round.
+                await cityCollection.updateOne(
+                    { _id: city._id },
+                    {
+                        $set: {
+                            currentRound: round,
+                            lastRequestedAt: new Date(),
+                            lastStatus: summary.success ? "success" : "failed",
+                            lastStopReason: summary.stopReason,
+                            lastErrorId: summary.errorId || null,
+                            pagesFetched: summary.pages,
+                            hotelsFetched: summary.totalHotels,
                         },
-                    })),
-                    { ordered: false },
+                    },
                 );
             }
 
+            // ─── Persist batch stats in meta_data ───────────────────────────
             const lastProcessedId = cities[cities.length - 1]._id;
 
             await metaCollection.updateOne(
@@ -587,8 +688,8 @@ async function main() {
                         lastBatchAt: new Date(),
                         batchNumber,
                         batchSize: cities.length,
-                        successfulCount: successfulCities.length,
-                        failedCount: failedLogs.length,
+                        successfulCount: successCount,
+                        failedCount,
                         pagesFetched: batchPages,
                         hotelsFetched: batchHotels,
                     },
@@ -597,15 +698,16 @@ async function main() {
             );
 
             grandTotalFetched += cities.length;
-            grandTotalSuccessful += successfulCities.length;
-            grandTotalFailed += failedLogs.length;
+            grandTotalSuccessful += successCount;
+            grandTotalFailed += failedCount;
             grandTotalPages += batchPages;
             grandTotalHotels += batchHotels;
 
             console.log(`\n─── Batch ${batchNumber} Summary ───────────────────`);
+            console.log(`  Round:             ${round}`);
             console.log(`  Cities fetched:    ${cities.length}`);
-            console.log(`  Cities successful: ${successfulCities.length}`);
-            console.log(`  Cities failed:     ${failedLogs.length}`);
+            console.log(`  Cities successful: ${successCount}`);
+            console.log(`  Cities failed:     ${failedCount}`);
             console.log(`  Pages requested:   ${batchPages}`);
             console.log(`  Hotels received:   ${batchHotels}`);
             console.log(`  Last _id:          ${lastProcessedId}`);
@@ -616,6 +718,7 @@ async function main() {
         console.log("\n╔══════════════════════════════════════════╗");
         console.log("║           GRAND TOTAL SUMMARY            ║");
         console.log("╠══════════════════════════════════════════╣");
+        console.log(`║  Round             : ${String(round).padEnd(20)}║`);
         console.log(`║  Batches completed : ${String(batchNumber).padEnd(20)}║`);
         console.log(`║  Cities processed  : ${String(grandTotalFetched).padEnd(20)}║`);
         console.log(`║  Cities successful : ${String(grandTotalSuccessful).padEnd(20)}║`);
