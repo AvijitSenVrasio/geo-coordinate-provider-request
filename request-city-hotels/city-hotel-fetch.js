@@ -1,356 +1,410 @@
+require("dotenv").config();
 
-require('dotenv').config();
-
-const { MongoClient } = require('mongodb');
+const { MongoClient } = require("mongodb");
 
 const MONGODB_URI = process.env.MONGODB_URI;
-const DB_NAME = process.env.MONGODB_DB || 'vrasio_geo_cord';
+const DB_NAME = process.env.MONGODB_DB || "vrasio_geo_cord";
 
 // Local NestJS endpoint. Override with API_URL in .env if required.
 const API_URL =
-  process.env.API_URL ||
-  'http://localhost:3005/hotel-list/getHotelList';
+    process.env.API_URL || "http://localhost:3005/hotel-list/getHotelList";
 
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 60);
-const REQUEST_TIMEOUT_MS = Number(
-  process.env.REQUEST_TIMEOUT_MS || 60000,
-);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
 
-const CITY_COLLECTION = 'city_hotel_list';
-const META_COLLECTION = 'meta_data';
-const FAILED_LOG_COLLECTION = 'meta_data_request_log';
+const CITY_COLLECTION = "city_hotel_list";
+const META_COLLECTION = "meta_data";
+const FAILED_LOG_COLLECTION = "meta_data_request_log";
 
-const CHECKPOINT_ID = 'city_hotel_list_checkpoint';
+const CHECKPOINT_ID = "city_hotel_list_checkpoint";
 
 const DEFAULT_PAYLOAD = {
-  radius: 10,
-  checkIn: '2026-12-15',
-  checkOut: '2026-12-18',
-  rooms: 1,
-  adults: 2,
-  children: 0,
-  childAges: [],
-  providers: [
-    'DidaTravel',
-    'TBO',
-    'HotelBeds',
-    'RateHawkDirect',
-  ],
-  sort: 'recommended',
-  apply_fitlers: false,
-  visitor_geo: {
-    timezone: 'America/New_York',
-    country_code: 'US',
-  },
-  user_id: 'usr_948172635',
+    radius: 10,
+    checkIn: "2026-12-15",
+    checkOut: "2026-12-18",
+    rooms: 1,
+    adults: 2,
+    children: 0,
+    childAges: [],
+    providers: ["DidaTravel", "TBO", "HotelBeds", "RateHawkDirect"],
+    sort: "recommended",
+    apply_fitlers: false,
+    visitor_geo: {
+        timezone: "America/New_York",
+        country_code: "US",
+    },
+    user_id: "usr_948172635",
 };
 
+// Cooling period fallback (ms) when Retry-After header is absent.
+// Matches THROTTLE_SEARCH ttl: 60 000 ms = 1 minute.
+const RATE_LIMIT_FALLBACK_COOL_MS = Number(
+    process.env.RATE_LIMIT_FALLBACK_COOL_MS || 61000,
+);
+// Extra buffer added on top of Retry-After to avoid an immediate 429 on resume.
+const RATE_LIMIT_BUFFER_MS = Number(process.env.RATE_LIMIT_BUFFER_MS || 1000);
+// Max retries per city after a 429.
+const MAX_RATE_LIMIT_RETRIES = Number(process.env.MAX_RATE_LIMIT_RETRIES || 3);
+
+/**
+ * Sleeps for `ms` milliseconds. Logs a countdown so you know the
+ * script is alive during the cooling period.
+ */
+function sleep(ms, label = "Cooling") {
+    return new Promise((resolve) => {
+        const seconds = Math.ceil(ms / 1000);
+        console.log(`\n⏳ ${label}: sleeping for ${seconds}s (${ms} ms) …`);
+
+        let remaining = seconds;
+        const ticker = setInterval(() => {
+            remaining -= 1;
+            if (remaining > 0 && remaining % 5 === 0) {
+                process.stdout.write(`   ${remaining}s remaining …\r`);
+            }
+        }, 1000);
+
+        setTimeout(() => {
+            clearInterval(ticker);
+            process.stdout.write("\n");
+            resolve();
+        }, ms);
+    });
+}
+
 function buildPayload(city) {
-  const latitude = Number(city.lat);
-  const longitude = Number(city.long);
-  const locationName = String(city.city || '').trim();
+    const latitude = Number(city.lat);
+    const longitude = Number(city.long);
+    const locationName = String(city.city || "").trim();
 
-  if (
-    !locationName ||
-    !Number.isFinite(latitude) ||
-    !Number.isFinite(longitude)
-  ) {
-    throw new Error(`Invalid city data for MongoDB _id=${city._id}`);
-  }
+    if (
+        !locationName ||
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+    ) {
+        throw new Error(`Invalid city data for MongoDB _id=${city._id}`);
+    }
 
-  return {
-    ...DEFAULT_PAYLOAD,
-    latitude,
-    longitude,
-    locationName,
-  };
+    return {
+        ...DEFAULT_PAYLOAD,
+        latitude,
+        longitude,
+        locationName,
+    };
 }
 
 function parseResponseBody(text) {
-  if (!text) return null;
+    if (!text) return null;
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+    try {
+        return JSON.parse(text);
+    } catch {
+        return text;
+    }
 }
 
 async function hitApi(payload) {
-  const startedAt = Date.now();
-  const controller = new AbortController();
+    const startedAt = Date.now();
+    const controller = new AbortController();
 
-  const timeout = setTimeout(
-    () => controller.abort(),
-    REQUEST_TIMEOUT_MS,
-  );
-
-  try {
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    let responseBody;
-    let responseReadError = null;
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-      const responseText = await response.text();
-      responseBody = parseResponseBody(responseText);
+        const response = await fetch(API_URL, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                accept: "application/json",
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+        });
+
+        let responseBody;
+        let responseReadError = null;
+
+        try {
+            const responseText = await response.text();
+            responseBody = parseResponseBody(responseText);
+        } catch (error) {
+            responseBody = null;
+            responseReadError = error.message;
+        }
+
+        const durationMs = Date.now() - startedAt;
+        const success = response.ok && !responseReadError;
+
+        // NestJS throttler sets Retry-After in seconds on a 429.
+        const retryAfterSec =
+            response.status === 429
+                ? Number(response.headers.get("retry-after") || 0)
+                : 0;
+        const retryAfterMs =
+            retryAfterSec > 0
+                ? retryAfterSec * 1000
+                : RATE_LIMIT_FALLBACK_COOL_MS;
+
+        return {
+            success,
+            isRateLimited: response.status === 429,
+            retryAfterMs,
+            statusCode: response.status,
+            response: responseBody,
+            error: success
+                ? null
+                : responseReadError
+                  ? `Failed to read response body: ${responseReadError}`
+                  : `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
+            durationMs,
+            responseHeaders: {
+                contentType: response.headers.get("content-type"),
+                requestId:
+                    response.headers.get("x-request-id") ||
+                    response.headers.get("request-id"),
+                retryAfter: response.headers.get("retry-after"), // ← add this
+            },
+        };
     } catch (error) {
-      responseBody = null;
-      responseReadError = error.message;
+        const durationMs = Date.now() - startedAt;
+        const isTimeout =
+            error.name === "AbortError" || controller.signal.aborted;
+
+        return {
+            success: false,
+            statusCode: null,
+            response: null,
+            error: isTimeout
+                ? `Request timed out after ${REQUEST_TIMEOUT_MS} ms`
+                : error.message || "Unknown network error",
+            errorName: error.name || null,
+            errorCode: error.cause?.code || null,
+            durationMs,
+        };
+    } finally {
+        clearTimeout(timeout);
     }
-
-    const durationMs = Date.now() - startedAt;
-    const success = response.ok && !responseReadError;
-
-    return {
-      success,
-      statusCode: response.status,
-      response: responseBody,
-      error: success
-        ? null
-        : responseReadError
-          ? `Failed to read response body: ${responseReadError}`
-          : `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`,
-      durationMs,
-      responseHeaders: {
-        contentType: response.headers.get('content-type'),
-        requestId:
-          response.headers.get('x-request-id') ||
-          response.headers.get('request-id'),
-      },
-    };
-  } catch (error) {
-    const durationMs = Date.now() - startedAt;
-    const isTimeout =
-      error.name === 'AbortError' ||
-      controller.signal.aborted;
-
-    return {
-      success: false,
-      statusCode: null,
-      response: null,
-      error: isTimeout
-        ? `Request timed out after ${REQUEST_TIMEOUT_MS} ms`
-        : error.message || 'Unknown network error',
-      errorName: error.name || null,
-      errorCode: error.cause?.code || null,
-      durationMs,
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function main() {
-  if (!MONGODB_URI) {
-    throw new Error('MONGODB_URI is missing from .env');
-  }
-
-  if (!Number.isInteger(BATCH_SIZE) || BATCH_SIZE < 1) {
-    throw new Error('BATCH_SIZE must be a positive integer');
-  }
-
-  if (
-    !Number.isFinite(REQUEST_TIMEOUT_MS) ||
-    REQUEST_TIMEOUT_MS <= 0
-  ) {
-    throw new Error('REQUEST_TIMEOUT_MS must be a positive number');
-  }
-
-  let parsedUrl;
-
-  try {
-    parsedUrl = new URL(API_URL);
-  } catch {
-    throw new Error(`API_URL is not a valid URL: ${API_URL}`);
-  }
-
-  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-    throw new Error('API_URL must use HTTP or HTTPS');
-  }
-
-  const client = new MongoClient(MONGODB_URI);
-
-  try {
-    await client.connect();
-
-    const db = client.db(DB_NAME);
-
-    const cityCollection = db.collection(CITY_COLLECTION);
-    const metaCollection = db.collection(META_COLLECTION);
-    const failedLogCollection = db.collection(
-      FAILED_LOG_COLLECTION,
-    );
-
-    console.log(`Connected to MongoDB: ${DB_NAME}`);
-    console.log(`Target API URL: ${API_URL}`);
-    console.log(`Batch size: ${BATCH_SIZE}`);
-    console.log('Concurrency: 1 (sequential requests)');
-    console.log(`Request timeout: ${REQUEST_TIMEOUT_MS} ms`);
-
-    // Read the previous checkpoint.
-    const checkpoint = await metaCollection.findOne({
-      _id: CHECKPOINT_ID,
-    });
-
-    const lastId = checkpoint?.lastProcessedId;
-
-    const filter = {
-      hitted: { $ne: 1 },
-    };
-
-    if (lastId) {
-      filter._id = { $gt: lastId };
+    if (!MONGODB_URI) {
+        throw new Error("MONGODB_URI is missing from .env");
     }
 
-    // Fetch the next batch in ascending _id order.
-    const cities = await cityCollection
-      .find(filter)
-      .sort({ _id: 1 })
-      .limit(BATCH_SIZE)
-      .toArray();
-
-    if (cities.length === 0) {
-      console.log(
-        'No eligible records found after the checkpoint. No requests sent.',
-      );
-      return;
+    if (!Number.isInteger(BATCH_SIZE) || BATCH_SIZE < 1) {
+        throw new Error("BATCH_SIZE must be a positive integer");
     }
 
-    const successfulIds = [];
-    const failedLogs = [];
+    if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS <= 0) {
+        throw new Error("REQUEST_TIMEOUT_MS must be a positive number");
+    }
 
-    // Process one city at a time. No same-run retries.
-    for (let i = 0; i < cities.length; i++) {
-      const city = cities[i];
+    let parsedUrl;
 
-      let payload = null;
-      let result;
+    try {
+        parsedUrl = new URL(API_URL);
+    } catch {
+        throw new Error(`API_URL is not a valid URL: ${API_URL}`);
+    }
 
-      console.log(
-        `\n[${i + 1}/${cities.length}] Requesting: ${city.city}`,
-      );
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        throw new Error("API_URL must use HTTP or HTTPS");
+    }
 
-      try {
-        payload = buildPayload(city);
-        result = await hitApi(payload);
-      } catch (error) {
-        result = {
-          success: false,
-          statusCode: null,
-          response: null,
-          error: error.message || 'Failed to build request payload',
-          errorName: error.name || null,
-          errorCode: null,
-          durationMs: 0,
-        };
-      }
+    const client = new MongoClient(MONGODB_URI);
 
-      console.log('Request result:', {
-        city: city.city,
-        success: result.success,
-        statusCode: result.statusCode,
-        durationMs: result.durationMs,
-        error: result.error,
-        errorCode: result.errorCode,
-      });
+    try {
+        await client.connect();
 
-      if (result.success) {
-        successfulIds.push(city._id);
+        const db = client.db(DB_NAME);
 
-        console.log(
-          `SUCCESS | ${city.city} | HTTP ${result.statusCode}`,
-        );
-      } else {
-        console.error(
-          `FAILED | ${city.city} | ` +
-            `HTTP ${result.statusCode ?? 'N/A'} | ${result.error}`,
-        );
+        const cityCollection = db.collection(CITY_COLLECTION);
+        const metaCollection = db.collection(META_COLLECTION);
+        const failedLogCollection = db.collection(FAILED_LOG_COLLECTION);
 
-        failedLogs.push({
-          recordId: city._id,
-          city: city.city,
-          request: payload,
-          response: result.response,
-          statusCode: result.statusCode,
-          error: result.error,
-          errorName: result.errorName || null,
-          errorCode: result.errorCode || null,
-          durationMs: result.durationMs ?? null,
-          responseHeaders: result.responseHeaders || null,
-          targetUrl: API_URL,
-          createdAt: new Date(),
+        console.log(`Connected to MongoDB: ${DB_NAME}`);
+        console.log(`Target API URL: ${API_URL}`);
+        console.log(`Batch size: ${BATCH_SIZE}`);
+        console.log("Concurrency: 1 (sequential requests)");
+        console.log(`Request timeout: ${REQUEST_TIMEOUT_MS} ms`);
+
+        // Read the previous checkpoint.
+        const checkpoint = await metaCollection.findOne({
+            _id: CHECKPOINT_ID,
         });
-      }
-    }
 
-    // Save failed requests before moving the checkpoint forward.
-    if (failedLogs.length > 0) {
-      await failedLogCollection.insertMany(failedLogs, {
-        ordered: true,
-      });
+        const lastId = checkpoint?.lastProcessedId;
 
-      console.log(
-        `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
-      );
-    }
+        const filter = {
+            hitted: { $ne: 1 },
+        };
 
-    // Bulk mark successful requests only.
-    if (successfulIds.length > 0) {
-      await cityCollection.bulkWrite(
-        successfulIds.map((_id) => ({
-          updateOne: {
-            filter: { _id },
-            update: {
-              $set: {
-                hitted: 1,
-                hittedAt: new Date(),
-              },
+        if (lastId) {
+            filter._id = { $gt: lastId };
+        }
+
+        // Fetch the next batch in ascending _id order.
+        const cities = await cityCollection
+            .find(filter)
+            .sort({ _id: 1 })
+            .limit(BATCH_SIZE)
+            .toArray();
+
+        if (cities.length === 0) {
+            console.log(
+                "No eligible records found after the checkpoint. No requests sent.",
+            );
+            return;
+        }
+
+        const successfulIds = [];
+        const failedLogs = [];
+
+        // Process one city at a time. No same-run retries.
+        for (let i = 0; i < cities.length; i++) {
+            const city = cities[i];
+
+            let payload = null;
+            let result;
+
+            console.log(
+                `\n[${i + 1}/${cities.length}] Requesting: ${city.city}`,
+            );
+
+            let rateLimitRetries = 0;
+
+            try {
+                payload = buildPayload(city);
+
+                // Retry loop: re-send after cooling if rate-limited.
+                while (true) {
+                    result = await hitApi(payload);
+
+                    if (!result.isRateLimited) break;
+
+                    rateLimitRetries += 1;
+                    if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
+                        console.error(
+                            `Rate-limit retries exhausted (${MAX_RATE_LIMIT_RETRIES}) for ${city.city}. Skipping.`,
+                        );
+                        break;
+                    }
+
+                    const coolMs = result.retryAfterMs + RATE_LIMIT_BUFFER_MS;
+                    console.warn(
+                        `⚠️  429 for ${city.city} ` +
+                            `(retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}). ` +
+                            `Retry-After: ${result.responseHeaders?.retryAfter ?? "N/A"}s`,
+                    );
+                    await sleep(coolMs, "Rate-limit cooling");
+                }
+            } catch (error) {
+                result = {
+                    success: false,
+                    statusCode: null,
+                    response: null,
+                    error: error.message,
+                    errorName: error.name,
+                    errorCode: null,
+                    durationMs: 0,
+                };
+            }
+
+            console.log("Request result:", {
+                city: city.city,
+                success: result.success,
+                statusCode: result.statusCode,
+                durationMs: result.durationMs,
+                error: result.error,
+                errorCode: result.errorCode,
+            });
+
+            if (result.success) {
+                successfulIds.push(city._id);
+
+                console.log(
+                    `SUCCESS | ${city.city} | HTTP ${result.statusCode}`,
+                );
+            } else {
+                console.error(
+                    `FAILED | ${city.city} | ` +
+                        `HTTP ${result.statusCode ?? "N/A"} | ${result.error}`,
+                );
+
+                failedLogs.push({
+                    recordId: city._id,
+                    city: city.city,
+                    request: payload,
+                    response: result.response,
+                    statusCode: result.statusCode,
+                    error: result.error,
+                    errorName: result.errorName || null,
+                    errorCode: result.errorCode || null,
+                    durationMs: result.durationMs ?? null,
+                    responseHeaders: result.responseHeaders || null,
+                    targetUrl: API_URL,
+                    createdAt: new Date(),
+                });
+            }
+        }
+
+        // Save failed requests before moving the checkpoint forward.
+        if (failedLogs.length > 0) {
+            await failedLogCollection.insertMany(failedLogs, {
+                ordered: true,
+            });
+
+            console.log(
+                `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
+            );
+        }
+
+        // Bulk mark successful requests only.
+        if (successfulIds.length > 0) {
+            await cityCollection.bulkWrite(
+                successfulIds.map((_id) => ({
+                    updateOne: {
+                        filter: { _id },
+                        update: {
+                            $set: {
+                                hitted: 1,
+                                hittedAt: new Date(),
+                            },
+                        },
+                    },
+                })),
+                { ordered: false },
+            );
+        }
+
+        // Advance the checkpoint after logs and city updates succeed.
+        const lastProcessedId = cities[cities.length - 1]._id;
+
+        await metaCollection.updateOne(
+            { _id: CHECKPOINT_ID },
+            {
+                $set: {
+                    lastProcessedId,
+                    lastBatchAt: new Date(),
+                    batchSize: cities.length,
+                    successfulCount: successfulIds.length,
+                    failedCount: failedLogs.length,
+                },
             },
-          },
-        })),
-        { ordered: false },
-      );
+            { upsert: true },
+        );
+
+        console.log("\n========== BATCH SUMMARY ==========");
+        console.log(`Fetched: ${cities.length}`);
+        console.log(`Successful: ${successfulIds.length}`);
+        console.log(`Failed: ${failedLogs.length}`);
+        console.log(`Last processed _id: ${lastProcessedId}`);
+        console.log("Failed requests were logged; no retries in this run.");
+        console.log("===================================");
+    } finally {
+        await client.close();
     }
-
-    // Advance the checkpoint after logs and city updates succeed.
-    const lastProcessedId = cities[cities.length - 1]._id;
-
-    await metaCollection.updateOne(
-      { _id: CHECKPOINT_ID },
-      {
-        $set: {
-          lastProcessedId,
-          lastBatchAt: new Date(),
-          batchSize: cities.length,
-          successfulCount: successfulIds.length,
-          failedCount: failedLogs.length,
-        },
-      },
-      { upsert: true },
-    );
-
-    console.log('\n========== BATCH SUMMARY ==========');
-    console.log(`Fetched: ${cities.length}`);
-    console.log(`Successful: ${successfulIds.length}`);
-    console.log(`Failed: ${failedLogs.length}`);
-    console.log(`Last processed _id: ${lastProcessedId}`);
-    console.log('Failed requests were logged; no retries in this run.');
-    console.log('===================================');
-  } finally {
-    await client.close();
-  }
 }
 
 main().catch((error) => {
-  console.error('Script failed:', error);
-  process.exitCode = 1;
+    console.error("Script failed:", error);
+    process.exitCode = 1;
 });
