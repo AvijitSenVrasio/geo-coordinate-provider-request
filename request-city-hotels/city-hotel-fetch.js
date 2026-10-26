@@ -198,7 +198,6 @@ async function main() {
     }
 
     let parsedUrl;
-
     try {
         parsedUrl = new URL(API_URL);
     } catch {
@@ -215,7 +214,6 @@ async function main() {
         await client.connect();
 
         const db = client.db(DB_NAME);
-
         const cityCollection = db.collection(CITY_COLLECTION);
         const metaCollection = db.collection(META_COLLECTION);
         const failedLogCollection = db.collection(FAILED_LOG_COLLECTION);
@@ -226,179 +224,199 @@ async function main() {
         console.log("Concurrency: 1 (sequential requests)");
         console.log(`Request timeout: ${REQUEST_TIMEOUT_MS} ms`);
 
-        // Read the previous checkpoint.
-        const checkpoint = await metaCollection.findOne({
-            _id: CHECKPOINT_ID,
-        });
+        // ─── Grand totals across all batches ───────────────────────────────
+        let batchNumber = 0;
+        let grandTotalFetched = 0;
+        let grandTotalSuccessful = 0;
+        let grandTotalFailed = 0;
 
-        const lastId = checkpoint?.lastProcessedId;
+        // ─── Outer loop: keep going until no unhitted records remain ───────
+        while (true) {
+            batchNumber += 1;
 
-        const filter = {
-            hitted: { $ne: 1 },
-        };
+            // Read the current checkpoint (re-read each iteration so it
+            // reflects what was written at the end of the previous batch).
+            const checkpoint = await metaCollection.findOne({
+                _id: CHECKPOINT_ID,
+            });
+            const lastId = checkpoint?.lastProcessedId;
 
-        if (lastId) {
-            filter._id = { $gt: lastId };
-        }
-
-        // Fetch the next batch in ascending _id order.
-        const cities = await cityCollection
-            .find(filter)
-            .sort({ _id: 1 })
-            .limit(BATCH_SIZE)
-            .toArray();
-
-        if (cities.length === 0) {
-            console.log(
-                "No eligible records found after the checkpoint. No requests sent.",
-            );
-            return;
-        }
-
-        const successfulIds = [];
-        const failedLogs = [];
-
-        // Process one city at a time. No same-run retries.
-        for (let i = 0; i < cities.length; i++) {
-            const city = cities[i];
-
-            let payload = null;
-            let result;
-
-            console.log(
-                `\n[${i + 1}/${cities.length}] Requesting: ${city.city}`,
-            );
-
-            let rateLimitRetries = 0;
-
-            try {
-                payload = buildPayload(city);
-
-                // Retry loop: re-send after cooling if rate-limited.
-                while (true) {
-                    result = await hitApi(payload);
-
-                    if (!result.isRateLimited) break;
-
-                    rateLimitRetries += 1;
-                    if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
-                        console.error(
-                            `Rate-limit retries exhausted (${MAX_RATE_LIMIT_RETRIES}) for ${city.city}. Skipping.`,
-                        );
-                        break;
-                    }
-
-                    const coolMs = result.retryAfterMs + RATE_LIMIT_BUFFER_MS;
-                    console.warn(
-                        `⚠️  429 for ${city.city} ` +
-                            `(retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}). ` +
-                            `Retry-After: ${result.responseHeaders?.retryAfter ?? "N/A"}s`,
-                    );
-                    await sleep(coolMs, "Rate-limit cooling");
-                }
-            } catch (error) {
-                result = {
-                    success: false,
-                    statusCode: null,
-                    response: null,
-                    error: error.message,
-                    errorName: error.name,
-                    errorCode: null,
-                    durationMs: 0,
-                };
+            const filter = { hitted: { $ne: 1 } };
+            if (lastId) {
+                filter._id = { $gt: lastId };
             }
 
-            console.log("Request result:", {
-                city: city.city,
-                success: result.success,
-                statusCode: result.statusCode,
-                durationMs: result.durationMs,
-                error: result.error,
-                errorCode: result.errorCode,
-            });
+            // Fetch next batch in ascending _id order.
+            const cities = await cityCollection
+                .find(filter)
+                .sort({ _id: 1 })
+                .limit(BATCH_SIZE)
+                .toArray();
 
-            if (result.success) {
-                successfulIds.push(city._id);
+            if (cities.length === 0) {
+                console.log(
+                    "\n✅ No more eligible records found. All cities processed!",
+                );
+                break;
+            }
+
+            console.log(
+                `\n${"═".repeat(42)}\n` +
+                `BATCH ${batchNumber} — ${cities.length} cities to process\n` +
+                `${"═".repeat(42)}`,
+            );
+
+            const successfulIds = [];
+            const failedLogs = [];
+
+            // ─── Process cities one at a time ──────────────────────────────
+            for (let i = 0; i < cities.length; i++) {
+                const city = cities[i];
+                let payload = null;
+                let result;
 
                 console.log(
-                    `SUCCESS | ${city.city} | HTTP ${result.statusCode}`,
-                );
-            } else {
-                console.error(
-                    `FAILED | ${city.city} | ` +
-                        `HTTP ${result.statusCode ?? "N/A"} | ${result.error}`,
+                    `\n[Batch ${batchNumber}][${i + 1}/${cities.length}] Requesting: ${city.city}`,
                 );
 
-                failedLogs.push({
-                    recordId: city._id,
+                let rateLimitRetries = 0;
+
+                try {
+                    payload = buildPayload(city);
+
+                    // Retry loop: re-send after cooling if rate-limited.
+                    while (true) {
+                        result = await hitApi(payload);
+
+                        if (!result.isRateLimited) break;
+
+                        rateLimitRetries += 1;
+                        if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
+                            console.error(
+                                `Rate-limit retries exhausted (${MAX_RATE_LIMIT_RETRIES}) for ${city.city}. Skipping.`,
+                            );
+                            break;
+                        }
+
+                        const coolMs = result.retryAfterMs + RATE_LIMIT_BUFFER_MS;
+                        console.warn(
+                            `⚠️  429 for ${city.city} ` +
+                                `(retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}). ` +
+                                `Retry-After: ${result.responseHeaders?.retryAfter ?? "N/A"}s`,
+                        );
+                        await sleep(coolMs, "Rate-limit cooling");
+                    }
+                } catch (error) {
+                    result = {
+                        success: false,
+                        statusCode: null,
+                        response: null,
+                        error: error.message,
+                        errorName: error.name,
+                        errorCode: null,
+                        durationMs: 0,
+                    };
+                }
+
+                console.log("Request result:", {
                     city: city.city,
-                    request: payload,
-                    response: result.response,
+                    success: result.success,
                     statusCode: result.statusCode,
+                    durationMs: result.durationMs,
                     error: result.error,
-                    errorName: result.errorName || null,
-                    errorCode: result.errorCode || null,
-                    durationMs: result.durationMs ?? null,
-                    responseHeaders: result.responseHeaders || null,
-                    targetUrl: API_URL,
-                    createdAt: new Date(),
+                    errorCode: result.errorCode,
                 });
+
+                if (result.success) {
+                    successfulIds.push(city._id);
+                    console.log(`SUCCESS | ${city.city} | HTTP ${result.statusCode}`);
+                } else {
+                    console.error(
+                        `FAILED | ${city.city} | ` +
+                            `HTTP ${result.statusCode ?? "N/A"} | ${result.error}`,
+                    );
+                    failedLogs.push({
+                        recordId: city._id,
+                        city: city.city,
+                        request: payload,
+                        response: result.response,
+                        statusCode: result.statusCode,
+                        error: result.error,
+                        errorName: result.errorName || null,
+                        errorCode: result.errorCode || null,
+                        durationMs: result.durationMs ?? null,
+                        responseHeaders: result.responseHeaders || null,
+                        targetUrl: API_URL,
+                        createdAt: new Date(),
+                    });
+                }
             }
-        }
 
-        // Save failed requests before moving the checkpoint forward.
-        if (failedLogs.length > 0) {
-            await failedLogCollection.insertMany(failedLogs, {
-                ordered: true,
-            });
+            // ─── Persist batch results ──────────────────────────────────────
 
-            console.log(
-                `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
-            );
-        }
+            if (failedLogs.length > 0) {
+                await failedLogCollection.insertMany(failedLogs, {
+                    ordered: true,
+                });
+                console.log(
+                    `Saved ${failedLogs.length} failed request(s) to ${FAILED_LOG_COLLECTION}.`,
+                );
+            }
 
-        // Bulk mark successful requests only.
-        if (successfulIds.length > 0) {
-            await cityCollection.bulkWrite(
-                successfulIds.map((_id) => ({
-                    updateOne: {
-                        filter: { _id },
-                        update: {
-                            $set: {
-                                hitted: 1,
-                                hittedAt: new Date(),
-                            },
+            if (successfulIds.length > 0) {
+                await cityCollection.bulkWrite(
+                    successfulIds.map((_id) => ({
+                        updateOne: {
+                            filter: { _id },
+                            update: { $set: { hitted: 1, hittedAt: new Date() } },
                         },
+                    })),
+                    { ordered: false },
+                );
+            }
+
+            const lastProcessedId = cities[cities.length - 1]._id;
+
+            await metaCollection.updateOne(
+                { _id: CHECKPOINT_ID },
+                {
+                    $set: {
+                        lastProcessedId,
+                        lastBatchAt: new Date(),
+                        batchNumber,
+                        batchSize: cities.length,
+                        successfulCount: successfulIds.length,
+                        failedCount: failedLogs.length,
                     },
-                })),
-                { ordered: false },
+                },
+                { upsert: true },
             );
+
+            grandTotalFetched += cities.length;
+            grandTotalSuccessful += successfulIds.length;
+            grandTotalFailed += failedLogs.length;
+
+            console.log(`\n─── Batch ${batchNumber} Summary ───────────────────`);
+            console.log(`  Fetched:    ${cities.length}`);
+            console.log(`  Successful: ${successfulIds.length}`);
+            console.log(`  Failed:     ${failedLogs.length}`);
+            console.log(`  Last _id:   ${lastProcessedId}`);
+            console.log(`────────────────────────────────────────────`);
+
+            // If this batch returned fewer records than BATCH_SIZE, we are
+            // almost certainly at the end — but we let the while-loop's
+            // own query confirm that on the next iteration.
         }
 
-        // Advance the checkpoint after logs and city updates succeed.
-        const lastProcessedId = cities[cities.length - 1]._id;
-
-        await metaCollection.updateOne(
-            { _id: CHECKPOINT_ID },
-            {
-                $set: {
-                    lastProcessedId,
-                    lastBatchAt: new Date(),
-                    batchSize: cities.length,
-                    successfulCount: successfulIds.length,
-                    failedCount: failedLogs.length,
-                },
-            },
-            { upsert: true },
-        );
-
-        console.log("\n========== BATCH SUMMARY ==========");
-        console.log(`Fetched: ${cities.length}`);
-        console.log(`Successful: ${successfulIds.length}`);
-        console.log(`Failed: ${failedLogs.length}`);
-        console.log(`Last processed _id: ${lastProcessedId}`);
-        console.log("Failed requests were logged; no retries in this run.");
-        console.log("===================================");
+        // ─── Grand total after all batches ──────────────────────────────────
+        console.log("\n╔══════════════════════════════════════════╗");
+        console.log("║           GRAND TOTAL SUMMARY            ║");
+        console.log("╠══════════════════════════════════════════╣");
+        console.log(`║  Batches completed : ${String(batchNumber).padEnd(20)}║`);
+        console.log(`║  Total fetched     : ${String(grandTotalFetched).padEnd(20)}║`);
+        console.log(`║  Total successful  : ${String(grandTotalSuccessful).padEnd(20)}║`);
+        console.log(`║  Total failed      : ${String(grandTotalFailed).padEnd(20)}║`);
+        console.log("╚══════════════════════════════════════════╝");
     } finally {
         await client.close();
     }
