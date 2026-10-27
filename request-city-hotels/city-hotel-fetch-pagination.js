@@ -33,11 +33,16 @@ const ERROR_LOG_COLLECTION = "error_logs"; // every failed request
 // Document in meta_data that stores the current round number.
 const CHECKPOINT_ID = "city_hotel_list_checkpoint";
 
-// Start a brand-new round (round number + 1) with:
-//   NEW_ROUND=true node script.js      or      node script.js --new-round
-const START_NEW_ROUND =
-    String(process.env.NEW_ROUND || "").toLowerCase() === "true" ||
-    process.argv.includes("--new-round");
+// Rounds advance automatically:
+//   - pending cities in the current round → continue that round
+//   - no pending cities left              → next start begins round + 1
+//
+// Optional: re-run ONLY the cities that failed in the current round
+// (e.g. after a server outage). Does not advance the round.
+//   RETRY_FAILED=true node script.js      or      node script.js --retry-failed
+const RETRY_FAILED =
+    String(process.env.RETRY_FAILED || "").toLowerCase() === "true" ||
+    process.argv.includes("--retry-failed");
 
 const DEFAULT_PAYLOAD = {
     radius: 10,
@@ -66,6 +71,26 @@ const RATE_LIMIT_FALLBACK_COOL_MS = Number(
 const RATE_LIMIT_BUFFER_MS = Number(process.env.RATE_LIMIT_BUFFER_MS || 1000);
 // Max retries per request after a 429.
 const MAX_RATE_LIMIT_RETRIES = Number(process.env.MAX_RATE_LIMIT_RETRIES || 3);
+
+// ─── Connection-error handling (server down / restarting) ───────────────────
+// On ECONNREFUSED etc. the script waits and re-sends the SAME page instead of
+// failing the city. Wait doubles each retry: 10s, 20s, 40s, 80s, 120s, 120s …
+const MAX_CONNECTION_RETRIES = Number(process.env.MAX_CONNECTION_RETRIES || 6);
+const CONNECTION_RETRY_BASE_MS = Number(
+    process.env.CONNECTION_RETRY_BASE_MS || 10000,
+);
+const CONNECTION_RETRY_MAX_MS = Number(
+    process.env.CONNECTION_RETRY_MAX_MS || 120000,
+);
+const CONNECTION_ERROR_CODES = new Set([
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EPIPE",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+]);
 
 /**
  * Sleeps for `ms` milliseconds. Logs a countdown so you know the
@@ -203,6 +228,8 @@ async function hitApi(payload) {
                 : error.message || "Unknown network error",
             errorName: error.name || null,
             errorCode: error.cause?.code || null,
+            isConnectionError:
+                !isTimeout && CONNECTION_ERROR_CODES.has(error.cause?.code),
             durationMs,
         };
     } finally {
@@ -217,28 +244,56 @@ async function hitApi(payload) {
  */
 async function hitApiWithRateLimitRetry(payload, cityName) {
     let rateLimitRetries = 0;
+    let connectionRetries = 0;
     let result;
 
     while (true) {
         result = await hitApi(payload);
 
-        if (!result.isRateLimited) break;
+        // ── 429: wait for the throttler window, then re-send ───────────────
+        if (result.isRateLimited) {
+            rateLimitRetries += 1;
+            if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
+                console.error(
+                    `Rate-limit retries exhausted (${MAX_RATE_LIMIT_RETRIES}) for ${cityName}. Giving up on this request.`,
+                );
+                break;
+            }
 
-        rateLimitRetries += 1;
-        if (rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
-            console.error(
-                `Rate-limit retries exhausted (${MAX_RATE_LIMIT_RETRIES}) for ${cityName}. Giving up on this request.`,
+            const coolMs = result.retryAfterMs + RATE_LIMIT_BUFFER_MS;
+            console.warn(
+                `⚠️  429 for ${cityName} ` +
+                    `(retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}). ` +
+                    `Retry-After: ${result.responseHeaders?.retryAfter ?? "N/A"}s`,
             );
-            break;
+            await sleep(coolMs, "Rate-limit cooling");
+            continue;
         }
 
-        const coolMs = result.retryAfterMs + RATE_LIMIT_BUFFER_MS;
-        console.warn(
-            `⚠️  429 for ${cityName} ` +
-                `(retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES}). ` +
-                `Retry-After: ${result.responseHeaders?.retryAfter ?? "N/A"}s`,
-        );
-        await sleep(coolMs, "Rate-limit cooling");
+        // ── Server unreachable (ECONNREFUSED etc.): back off, then re-send ─
+        if (result.isConnectionError) {
+            connectionRetries += 1;
+            if (connectionRetries > MAX_CONNECTION_RETRIES) {
+                console.error(
+                    `Connection retries exhausted (${MAX_CONNECTION_RETRIES}) for ${cityName} ` +
+                        `(${result.errorCode}). Giving up on this request.`,
+                );
+                break;
+            }
+
+            const waitMs = Math.min(
+                CONNECTION_RETRY_BASE_MS * 2 ** (connectionRetries - 1),
+                CONNECTION_RETRY_MAX_MS,
+            );
+            console.warn(
+                `⚠️  ${result.errorCode} for ${cityName} ` +
+                    `(retry ${connectionRetries}/${MAX_CONNECTION_RETRIES}). Server may be down or restarting.`,
+            );
+            await sleep(waitMs, "Waiting for server");
+            continue;
+        }
+
+        break;
     }
 
     return result;
@@ -247,12 +302,15 @@ async function hitApiWithRateLimitRetry(payload, cityName) {
 // ─── Round handling ─────────────────────────────────────────────────────────
 
 /**
- * Reads the current round from meta_data.
- *  - No round stored yet           → starts at 1.
- *  - NEW_ROUND=true / --new-round  → previous round + 1.
- *  - Otherwise                     → continues the stored round.
+ * Decides which round this run belongs to (stored in meta_data).
+ *  - No round stored yet                     → round 1.
+ *  - RETRY_FAILED mode                       → stay in the stored round.
+ *  - Stored round still has pending cities   → continue it.
+ *  - Stored round has NO pending cities left → advance to round + 1.
+ *
+ * "Pending" = a city whose currentRound is not the stored round.
  */
-async function resolveCurrentRound(metaCollection) {
+async function resolveCurrentRound(metaCollection, cityCollection) {
     const checkpoint = await metaCollection.findOne({ _id: CHECKPOINT_ID });
     const stored = Number(checkpoint?.currentRound);
     const hasValidRound = Number.isInteger(stored) && stored >= 1;
@@ -267,21 +325,42 @@ async function resolveCurrentRound(metaCollection) {
         return 1;
     }
 
-    if (START_NEW_ROUND) {
-        const next = stored + 1;
-        await metaCollection.updateOne(
-            { _id: CHECKPOINT_ID },
-            {
-                $set: { currentRound: next, roundStartedAt: new Date() },
-                $unset: { lastProcessedId: "" },
-            },
+    if (RETRY_FAILED) {
+        console.log(
+            `🔁 RETRY_FAILED mode: re-running failed cities of round ${stored}.`,
         );
-        console.log(`🔁 NEW ROUND requested: round ${stored} → round ${next}.`);
-        return next;
+        return stored;
     }
 
-    console.log(`🔁 Continuing round ${stored}.`);
-    return stored;
+    const pending = await cityCollection.findOne(
+        { currentRound: { $ne: stored } },
+        { projection: { _id: 1 } },
+    );
+
+    if (pending) {
+        console.log(`🔁 Round ${stored} has pending cities. Continuing round ${stored}.`);
+        return stored;
+    }
+
+    // Guard: an empty city collection must not bump the round on every run.
+    const anyCity = await cityCollection.findOne({}, { projection: { _id: 1 } });
+    if (!anyCity) {
+        console.log(`⚠️  ${CITY_COLLECTION} is empty. Staying on round ${stored}.`);
+        return stored;
+    }
+
+    const next = stored + 1;
+    await metaCollection.updateOne(
+        { _id: CHECKPOINT_ID },
+        {
+            $set: { currentRound: next, roundStartedAt: new Date() },
+            $unset: { lastProcessedId: "" },
+        },
+    );
+    console.log(
+        `🔁 Round ${stored} is complete (no pending cities). Starting round ${next}.`,
+    );
+    return next;
 }
 
 // ─── Logging helpers ────────────────────────────────────────────────────────
@@ -583,7 +662,7 @@ async function main() {
             `Pagination: stop on empty page or ${MAX_CONSECUTIVE_LOW_PAGES} consecutive pages with < ${MIN_RECORDS_PER_PAGE} hotels`,
         );
 
-        const round = await resolveCurrentRound(metaCollection);
+        const round = await resolveCurrentRound(metaCollection, cityCollection);
 
         const ctx = {
             round,
@@ -599,6 +678,9 @@ async function main() {
         let grandTotalFailed = 0;
         let grandTotalPages = 0;
         let grandTotalHotels = 0;
+        // Only used in RETRY_FAILED mode so a city that fails again is not
+        // picked up forever in the same run.
+        let retryCursor = null;
 
         // ─── Outer loop: keep going until every city has been requested in
         //     this round. A city is "done for this round" once its
@@ -606,20 +688,37 @@ async function main() {
         while (true) {
             batchNumber += 1;
 
+            const filter = RETRY_FAILED
+                ? { currentRound: round, lastStatus: "failed" }
+                : { currentRound: { $ne: round } };
+            if (RETRY_FAILED && retryCursor) {
+                filter._id = { $gt: retryCursor };
+            }
+
             const cities = await cityCollection
-                .find({ currentRound: { $ne: round } })
+                .find(filter)
                 .sort({ _id: 1 })
                 .limit(BATCH_SIZE)
                 .toArray();
 
             if (cities.length === 0) {
-                console.log(
-                    `\n✅ Round ${round} complete. Every city has been requested in this round.`,
-                );
-                console.log(
-                    "   To start another full pass run with NEW_ROUND=true (or --new-round).",
-                );
+                if (RETRY_FAILED) {
+                    console.log(
+                        `\n✅ Retry pass finished for round ${round}.`,
+                    );
+                } else {
+                    console.log(
+                        `\n✅ Round ${round} complete. Every city has been requested in this round.`,
+                    );
+                    console.log(
+                        `   Run the script again to start round ${round + 1}.`,
+                    );
+                }
                 break;
+            }
+
+            if (RETRY_FAILED) {
+                retryCursor = cities[cities.length - 1]._id;
             }
 
             console.log(
