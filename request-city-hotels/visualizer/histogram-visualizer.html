@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Histogram Visualizer</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+    .subtitle { font-size: 0.85rem; color: #64748b; margin-bottom: 28px; }
+    .container { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 20px; }
+
+    /* Controls bar */
+    .controls-bar {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 18px 22px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 180px; }
+    .field label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    select {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.88rem;
+      padding: 10px 14px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 34px;
+    }
+    select:focus { border-color: #6366f1; }
+    select option { background: #1e2130; }
+
+    /* Status */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.82rem;
+      color: #64748b;
+      min-height: 20px;
+    }
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid #2d3148;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error */
+    .error {
+      background: rgba(239,68,68,0.12);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #f87171;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      display: none;
+    }
+
+    /* City card */
+    .city-card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 28px 24px;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .city-header { margin-bottom: 20px; }
+    .city-title { font-size: 1.15rem; font-weight: 700; color: #e2e8f0; }
+    .city-country { font-size: 0.8rem; color: #64748b; margin-top: 3px; }
+
+    /* Provider pills */
+    .provider-stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+    .provider-pill {
+      display: flex; align-items: center; gap: 10px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 10px 16px;
+    }
+    .pill-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .pill-name { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+    .pill-divider { width: 1px; height: 24px; background: #2d3148; }
+    .pill-stat { text-align: center; }
+    .pill-stat .val { font-size: 1rem; font-weight: 700; }
+    .pill-stat .lbl { font-size: 0.65rem; color: #64748b; margin-top: 1px; }
+
+    canvas { max-height: 360px; }
+
+    /* Legend */
+    .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; justify-content: center; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: #94a3b8; }
+    .legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+
+    /* Analysis options */
+    .options-bar {
+      display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
+      margin-bottom: 16px; padding: 12px 16px;
+      background: #0f1117; border: 1px solid #2d3148; border-radius: 10px;
+      font-size: 0.8rem; color: #94a3b8;
+    }
+    .options-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .options-bar input[type=checkbox] { accent-color: #6366f1; }
+    .options-bar select, .options-bar input[type=number] {
+      background: #1e2130; border: 1px solid #2d3148; border-radius: 6px;
+      color: #e2e8f0; font-family: 'Inter', sans-serif; font-size: 0.8rem; padding: 5px 8px;
+    }
+    .options-bar select { padding-right: 26px; background-position: right 8px center; }
+    .options-bar input[type=number] { width: 78px; }
+    .opt-title { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; }
+
+    /* Stats table */
+    .stats-wrap { margin-top: 22px; overflow-x: auto; }
+    .stats-title { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin-bottom: 8px; }
+    table.stats { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    table.stats th, table.stats td { padding: 9px 12px; text-align: right; border-bottom: 1px solid #2d3148; white-space: nowrap; }
+    table.stats th { font-size: 0.68rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+    table.stats th:first-child, table.stats td:first-child { text-align: left; }
+    table.stats td.warn { color: #f87171; font-weight: 600; }
+    .badge { font-size: 0.68rem; padding: 2px 8px; border-radius: 99px; background: #2d3148; color: #cbd5e1; }
+    .badge.bad { background: rgba(239,68,68,0.15); color: #f87171; }
+    .explain { margin-top: 12px; font-size: 0.74rem; color: #64748b; line-height: 1.5; }
+
+    /* Empty state */
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #475569;
+      font-size: 0.9rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Histogram Visualizer</h1>
+<p class="subtitle">Live data from API — select city & provider to explore</p>
+
+<div class="container">
+  <div class="controls-bar">
+    <div class="field">
+      <label>City</label>
+      <select id="citySelect" onchange="onCityChange()">
+        <option value="">Loading cities...</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Provider</label>
+      <select id="providerSelect" onchange="onProviderChange()">
+        <option value="">All Providers</option>
+        <option value="dida">DIDA</option>
+        <option value="hb">HB</option>
+        <option value="tbo">TBO</option>
+      </select>
+    </div>
+    <div class="status-bar">
+      <div class="spinner" id="spinner"></div>
+      <span id="statusText"></span>
+    </div>
+  </div>
+
+  <div class="controls-bar" style="align-items:center">
+    <span class="opt-title">Analysis</span>
+    <label style="display:flex;gap:6px;align-items:center;font-size:.8rem;color:#94a3b8">Y-axis
+      <select id="optMode" onchange="rerender()" style="padding:5px 26px 5px 8px;font-size:.8rem">
+        <option value="count">Request count</option>
+        <option value="pct">% of provider's requests</option>
+      </select>
+    </label>
+    <div class="options-bar" style="margin:0;padding:0;border:0;background:none">
+      <label><input type="checkbox" id="optSigma3" checked onchange="rerender()"> 3σ band</label>
+      <label><input type="checkbox" id="optSigma6" onchange="rerender()"> 6σ band</label>
+      <label><input type="checkbox" id="optMean" checked onchange="rerender()"> Mean</label>
+      <label><input type="checkbox" id="optP95" checked onchange="rerender()"> p95</label>
+      <label><input type="checkbox" id="optCdf" checked onchange="rerender()"> Cumulative %</label>
+      <label>SLA (ms) <input type="number" id="optSla" value="3000" step="100" min="0" onchange="rerender()"></label>
+    </div>
+  </div>
+
+  <div class="error" id="errorBox"></div>
+  <div id="chartsRoot"></div>
+  <div class="empty" id="emptyState">Select a city to load the histogram</div>
+</div>
+
+<script>
+  const BASE = 'https://staging.vrasio.com/vrasio-hotel';
+
+  const PROVIDER_COLORS = {
+    dida: { solid: '#6366f1', light: 'rgba(99,102,241,0.70)',  dot: '#6366f1' },
+    hb:   { solid: '#10b981', light: 'rgba(16,185,129,0.70)',  dot: '#10b981' },
+    tbo:  { solid: '#f59e0b', light: 'rgba(245,158,11,0.70)',  dot: '#f59e0b' },
+  };
+  function colorFor(name) {
+    return PROVIDER_COLORS[name.toLowerCase()] ?? { solid: '#a78bfa', light: 'rgba(167,139,250,0.70)', dot: '#a78bfa' };
+  }
+
+  let chartInstances = [];
+  let lastData = null;
+
+  function setLoading(on, msg) {
+    document.getElementById('spinner').style.display = on ? 'block' : 'none';
+    document.getElementById('statusText').textContent = msg || '';
+  }
+
+  function showError(msg) {
+    const b = document.getElementById('errorBox');
+    b.textContent = 'Error: ' + msg;
+    b.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('errorBox').style.display = 'none';
+  }
+
+  function peakBucket(buckets) {
+    return buckets.reduce((a, b) => b.count > a.count ? b : a, { count: -1, range_ms: '-' });
+  }
+
+  // ── Load cities ────────────────────────────────────────────────────────────
+  async function loadCities() {
+    setLoading(true, 'Loading cities...');
+    try {
+      const res  = await fetch(`${BASE}/analyze/cities`);
+      const json = await res.json();
+
+      // Accept: { data: ["Orlando", ...] } or { data: [{city,country}, ...] } or array
+      let cities = json.data ?? json;
+      if (!Array.isArray(cities)) throw new Error('Unexpected city list format');
+
+      const sel = document.getElementById('citySelect');
+      sel.innerHTML = '';
+
+      cities.forEach((c, i) => {
+        const opt   = document.createElement('option');
+        const label = typeof c === 'string' ? c : (c.city || c.name || JSON.stringify(c));
+        const value = typeof c === 'string' ? c : (c.city || c.name);
+        opt.value   = value;
+        opt.textContent = label;
+        sel.appendChild(opt);
+      });
+
+      setLoading(false, cities.length + ' cities loaded');
+
+      // Auto-select first city
+      if (cities.length > 0) {
+        sel.selectedIndex = 0;
+        fetchHistogram();
+      }
+    } catch (e) {
+      setLoading(false);
+      showError('Failed to load cities: ' + e.message);
+    }
+  }
+
+  // ── Fetch histogram ────────────────────────────────────────────────────────
+  async function fetchHistogram() {
+    hideError();
+    const city     = document.getElementById('citySelect').value;
+    const provider = document.getElementById('providerSelect').value;
+
+    if (!city) return;
+
+    let url = `${BASE}/analyze/histogram?city=${encodeURIComponent(city)}`;
+    if (provider) url += `&provider=${encodeURIComponent(provider)}`;
+
+    setLoading(true, 'Fetching data...');
+    chartInstances.forEach(c => c.destroy());
+    chartInstances = [];
+    document.getElementById('chartsRoot').innerHTML = '';
+    lastData = null;
+    document.getElementById('emptyState').style.display = 'none';
+
+    try {
+      const res  = await fetch(url);
+      const json = await res.json();
+
+      if (!json.status) throw new Error(json.message || 'API returned error');
+
+      setLoading(false, 'Loaded');
+
+      if (Array.isArray(json.data) && json.data.length > 0) {
+        lastData = json.data;
+        rerender();
+      } else {
+        document.getElementById('emptyState').style.display = 'block';
+        document.getElementById('emptyState').textContent = 'No data for selected filters.';
+      }
+    } catch (e) {
+      setLoading(false);
+      showError('Fetch failed: ' + e.message);
+    }
+  }
+
+  function onCityChange()    { fetchHistogram(); }
+  function onProviderChange(){ fetchHistogram(); }
+
+  // ── Statistics (computed from histogram buckets, using bucket midpoints) ───
+  function parseBuckets(buckets) {
+    return buckets.map(b => {
+      const m = String(b.range_ms).match(/(\d+)\D+(\d+)/);
+      // open-ended bucket such as "10000+" → treat as one extra 100 ms wide bucket
+      const open = /^\s*(\d+)\s*\+/.exec(String(b.range_ms));
+      const lo = open ? +open[1] : m ? +m[1] : 0;
+      const hi = open ? lo + 100 : m ? +m[2] : 0;
+      return { lo, hi, mid: (lo + hi) / 2, count: b.count };
+    });
+  }
+
+  // Value below which `p` (0-1) of requests fall; interpolates inside the bucket.
+  function percentile(bs, n, p) {
+    const target = n * p;
+    let cum = 0;
+    for (const b of bs) {
+      if (cum + b.count >= target && b.count > 0) return b.lo + ((target - cum) / b.count) * (b.hi - b.lo);
+      cum += b.count;
+    }
+    return bs[bs.length - 1].hi;
+  }
+
+  // Share (0-1) of requests at or below `x` ms.
+  function cdfAt(bs, n, x) {
+    let cum = 0;
+    for (const b of bs) {
+      if (x >= b.hi) cum += b.count;
+      else if (x > b.lo) cum += b.count * ((x - b.lo) / (b.hi - b.lo));
+    }
+    return n ? cum / n : 0;
+  }
+
+  // Count of 2+ well-separated humps → "bimodal" (mean/σ mislead for these).
+  function isBimodal(bs) {
+    const c = bs.map((b, i) => {
+      let s = 0, k = 0;
+      for (let j = i - 2; j <= i + 2; j++) if (bs[j]) { s += bs[j].count; k++; }
+      return s / k;
+    });
+    const max = Math.max(...c);
+    const peaks = [];
+    for (let i = 1; i < c.length - 1; i++) {
+      if (c[i] >= max * 0.4 && c[i] >= c[i - 1] && c[i] > c[i + 1]) peaks.push(i);
+    }
+    for (let a = 0; a < peaks.length - 1; a++) {
+      const lo = Math.min(c[peaks[a]], c[peaks[a + 1]]);
+      const valley = Math.min(...c.slice(peaks[a], peaks[a + 1] + 1));
+      if (peaks[a + 1] - peaks[a] >= 6 && valley < lo * 0.6) return true;
+    }
+    return false;
+  }
+
+  function computeStats(pdata, slaMs) {
+    const bs = parseBuckets(pdata.buckets);
+    const n  = bs.reduce((s, b) => s + b.count, 0);
+    const mean = n ? bs.reduce((s, b) => s + b.mid * b.count, 0) / n : 0;
+    const sigma = n ? Math.sqrt(bs.reduce((s, b) => s + b.count * (b.mid - mean) ** 2, 0) / n) : 0;
+    const skew  = sigma ? bs.reduce((s, b) => s + b.count * (b.mid - mean) ** 3, 0) / n / sigma ** 3 : 0;
+    const above = x => n ? 1 - cdfAt(bs, n, x) : 0;
+    return {
+      bs, n, mean, sigma, skew,
+      median: percentile(bs, n, 0.5),
+      p90: percentile(bs, n, 0.9), p95: percentile(bs, n, 0.95), p99: percentile(bs, n, 0.99),
+      up3: mean + 3 * sigma, lo3: Math.max(0, mean - 3 * sigma),
+      up6: mean + 6 * sigma, lo6: Math.max(0, mean - 6 * sigma),
+      out3: above(mean + 3 * sigma),
+      withinSla: cdfAt(bs, n, slaMs),
+      slaSigma: sigma ? (slaMs - mean) / sigma : 0,
+      timeout: n ? bs[bs.length - 1].count / n : 0,
+      bimodal: isBimodal(bs),
+    };
+  }
+
+  const fmtMs  = v => Math.round(v).toLocaleString() + ' ms';
+  const fmtPct = v => (v * 100).toFixed(v > 0 && v < 0.001 ? 2 : 1) + '%';
+
+  // ── Chart.js plugin: σ bands, mean / p95 / SLA lines ───────────────────────
+  const overlayPlugin = {
+    id: 'overlay',
+    beforeDatasetsDraw(chart, _a, opts) {
+      const { ctx, chartArea: a, scales: { x } } = chart;
+      const lo = opts.firstLo, span = opts.lastHi - opts.firstLo;
+      const px = v => a.left + (Math.min(Math.max(v, lo), lo + span) - lo) / span * (a.right - a.left);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(a.left, a.top, a.right - a.left, a.bottom - a.top); ctx.clip();
+      opts.items.forEach(it => {
+        if (it.band) {
+          ctx.fillStyle = it.color + it.alpha;
+          ctx.fillRect(px(it.from), a.top, px(it.to) - px(it.from), a.bottom - a.top);
+        }
+      });
+      ctx.restore();
+    },
+    afterDatasetsDraw(chart, _a, opts) {
+      const { ctx, chartArea: a } = chart;
+      const lo = opts.firstLo, span = opts.lastHi - opts.firstLo;
+      const px = v => a.left + (Math.min(Math.max(v, lo), lo + span) - lo) / span * (a.right - a.left);
+      ctx.save();
+      ctx.font = '600 10px Inter, sans-serif';
+      opts.items.forEach(it => {
+        if (!it.line) return;
+        const xx = px(it.at);
+        ctx.strokeStyle = it.color; ctx.lineWidth = 1.5;
+        ctx.setLineDash(it.dash || []);
+        ctx.beginPath(); ctx.moveTo(xx, a.top); ctx.lineTo(xx, a.bottom); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = it.color;
+        ctx.textAlign = it.align || 'left';
+        ctx.fillText(it.label, xx + (it.align === 'right' ? -4 : 4), a.top + 11 + (it.row || 0) * 12);
+      });
+      ctx.restore();
+    }
+  };
+
+  // ── Render city card ───────────────────────────────────────────────────────
+  function rerender() {
+    if (!lastData) return;
+    chartInstances.forEach(c => c.destroy());
+    chartInstances = [];
+    document.getElementById('chartsRoot').innerHTML = '';
+    lastData.forEach(renderCityCard);
+  }
+
+  function renderCityCard(cityObj) {
+    const opt = {
+      pct:    document.getElementById('optMode').value === 'pct',
+      sigma3: document.getElementById('optSigma3').checked,
+      sigma6: document.getElementById('optSigma6').checked,
+      mean:   document.getElementById('optMean').checked,
+      p95:    document.getElementById('optP95').checked,
+      cdf:    document.getElementById('optCdf').checked,
+      sla:    +document.getElementById('optSla').value || 0,
+    };
+
+    const root     = document.getElementById('chartsRoot');
+    const card     = document.createElement('div');
+    card.className = 'city-card';
+
+    const providers = Object.entries(cityObj.providers);
+    const labels    = providers[0][1].buckets.map(b => b.range_ms);
+    const stats     = Object.fromEntries(providers.map(([name, p]) => [name, computeStats(p, opt.sla)]));
+    const first     = Object.values(stats)[0].bs;
+
+    const datasets = providers.map(([name, pdata]) => {
+      const col = colorFor(name);
+      const tot = pdata.total_record || 1;
+      return {
+        label:           name.toUpperCase(),
+        data:            pdata.buckets.map(b => opt.pct ? +(b.count / tot * 100).toFixed(2) : b.count),
+        backgroundColor: col.light,
+        borderColor:     col.solid,
+        borderWidth:     1.5,
+        borderRadius:    5,
+        yAxisID:         'y',
+        order:           2,
+      };
+    });
+
+    if (opt.cdf) {
+      providers.forEach(([name]) => {
+        const col = colorFor(name);
+        let cum = 0;
+        const s = stats[name];
+        datasets.push({
+          type: 'line', label: name.toUpperCase() + ' cumulative',
+          data: s.bs.map(b => { cum += b.count; return +(cum / (s.n || 1) * 100).toFixed(1); }),
+          borderColor: col.solid, backgroundColor: 'transparent',
+          borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0.25,
+          yAxisID: 'y2', order: 1,
+        });
+      });
+    }
+
+    // overlay items
+    const items = [];
+    providers.forEach(([name], i) => {
+      const s = stats[name], col = colorFor(name).solid;
+      if (opt.sigma6) items.push({ band: true, from: s.lo6, to: s.up6, color: col, alpha: '10' });
+      if (opt.sigma3) {
+        items.push({ band: true, from: s.lo3, to: s.up3, color: col, alpha: '1f' });
+        items.push({ line: true, at: s.up3, color: col, dash: [2, 3], label: `${name.toUpperCase()} +3σ ${Math.round(s.up3)}`, row: i, align: 'right' });
+      }
+      if (opt.sigma6) items.push({ line: true, at: s.up6, color: col, dash: [2, 3], label: `${name.toUpperCase()} +6σ ${Math.round(s.up6)}`, row: i + providers.length, align: 'right' });
+      if (opt.mean) items.push({ line: true, at: s.mean, color: col, dash: [], label: `μ ${Math.round(s.mean)}`, row: i + 2 * providers.length });
+      if (opt.p95)  items.push({ line: true, at: s.p95, color: col, dash: [8, 4], label: `p95 ${Math.round(s.p95)}`, row: i + 3 * providers.length });
+    });
+    if (opt.sla > 0) items.push({ line: true, at: opt.sla, color: '#f87171', dash: [], label: `SLA ${opt.sla}`, row: 4 * providers.length });
+
+    const pillsHTML = providers.map(([name, pdata]) => {
+      const col  = colorFor(name);
+      const s    = stats[name];
+      return `
+        <div class="provider-pill">
+          <div class="pill-dot" style="background:${col.dot}"></div>
+          <div class="pill-name" style="color:${col.dot}">${name.toUpperCase()}</div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${pdata.total_record}</div><div class="lbl">Total Req</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${Math.round(s.mean)}</div><div class="lbl">Mean ms</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${Math.round(s.sigma)}</div><div class="lbl">σ ms</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${Math.round(s.p95)}</div><div class="lbl">p95 ms</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${fmtPct(s.withinSla)}</div><div class="lbl">≤ ${opt.sla} ms</div></div>
+        </div>`;
+    }).join('');
+
+    const rows = [
+      ['Requests',                  s => s.n.toLocaleString()],
+      ['Mean (μ)',                  s => fmtMs(s.mean)],
+      ['Median (p50)',              s => fmtMs(s.median)],
+      ['Std deviation (σ)',         s => fmtMs(s.sigma)],
+      ['p90',                       s => fmtMs(s.p90)],
+      ['p95',                       s => fmtMs(s.p95)],
+      ['p99',                       s => fmtMs(s.p99)],
+      ['3σ range (μ ± 3σ)',         s => `${Math.round(s.lo3)} – ${Math.round(s.up3)} ms`],
+      ['Outliers beyond +3σ',       s => fmtPct(s.out3), s => s.out3 > 0.0027],
+      ['6σ upper limit (μ + 6σ)',   s => fmtMs(s.up6)],
+      [`Within SLA (${opt.sla} ms)`, s => fmtPct(s.withinSla), s => s.withinSla < 0.95],
+      ['SLA distance (in σ)',       s => s.slaSigma.toFixed(2) + 'σ', s => s.slaSigma < 3],
+      ['Hit timeout bucket',        s => fmtPct(s.timeout), s => s.timeout > 0.01],
+      ['Skewness',                  s => s.skew.toFixed(2)],
+      ['Shape',                     s => `<span class="badge ${s.bimodal ? 'bad' : ''}">${s.bimodal ? 'bimodal – σ unreliable' : Math.abs(s.skew) > 1 ? 'skewed' : 'roughly normal'}</span>`],
+    ];
+    const tableHTML = `
+      <div class="stats-wrap">
+        <div class="stats-title">Statistics</div>
+        <table class="stats">
+          <thead><tr><th>Metric</th>${providers.map(([n]) => `<th style="color:${colorFor(n).solid}">${n.toUpperCase()}</th>`).join('')}</tr></thead>
+          <tbody>${rows.map(([lbl, f, warn]) =>
+            `<tr><td>${lbl}</td>${providers.map(([n]) => `<td class="${warn && warn(stats[n]) ? 'warn' : ''}">${f(stats[n])}</td>`).join('')}</tr>`).join('')}
+          </tbody>
+        </table>
+        <div class="explain">σ and percentiles are estimated from 100 ms bucket midpoints. For a bell-shaped distribution ~99.73% of requests fall within μ ± 3σ and 99.99966% within μ ± 6σ; response times are usually right-skewed, so rely on p95 / p99 when "Shape" is not roughly normal. Red = worse than 3σ expectation, &lt;95% within SLA, SLA closer than 3σ, or &gt;1% timeouts.</div>
+      </div>`;
+
+    const legendHTML = providers.map(([name]) => {
+      const col = colorFor(name);
+      return `<div class="legend-item"><div class="legend-swatch" style="background:${col.solid}"></div>${name.toUpperCase()}</div>`;
+    }).join('');
+
+    const canvasId = 'chart-' + Math.random().toString(36).slice(2);
+    card.innerHTML = `
+      <div class="city-header">
+        <div class="city-title">${cityObj.city}</div>
+        <div class="city-country">${cityObj.country || ''}</div>
+      </div>
+      <div class="provider-stats">${pillsHTML}</div>
+      <canvas id="${canvasId}"></canvas>
+      <div class="legend">${legendHTML}</div>
+      ${tableHTML}`;
+    root.appendChild(card);
+
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    const instance = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets },
+      plugins: [overlayPlugin],
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          overlay: { items, firstLo: first[0].lo, lastHi: first[first.length - 1].hi },
+          tooltip: {
+            backgroundColor: '#1e2130', borderColor: '#2d3148', borderWidth: 1,
+            titleColor: '#e2e8f0', bodyColor: '#94a3b8',
+            callbacks: {
+              label: function(ctx) {
+                if (ctx.dataset.type === 'line') return ` ${ctx.dataset.label}: ${ctx.parsed.y}%`;
+                const key   = ctx.dataset.label.toLowerCase();
+                const total = cityObj.providers[key]?.total_record || 1;
+                const raw   = cityObj.providers[key].buckets[ctx.dataIndex].count;
+                return ` ${ctx.dataset.label}: ${raw} req  (${(raw / total * 100).toFixed(1)}%)`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            title: { display: true, text: 'Response Time (ms)', color: '#475569', font: { size: 11 } }
+          },
+          y: {
+            ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            title: { display: true, text: opt.pct ? '% of provider requests' : 'Request Count', color: '#475569', font: { size: 11 } }
+          },
+          y2: {
+            display: opt.cdf, position: 'right', min: 0, max: 100,
+            ticks: { color: '#64748b', font: { family: 'Inter', size: 11 }, callback: v => v + '%' },
+            grid:  { drawOnChartArea: false },
+            title: { display: true, text: 'Cumulative %', color: '#475569', font: { size: 11 } }
+          }
+        }
+      }
+    });
+    chartInstances.push(instance);
+  }
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  window.onload = loadCities;
+</script>
+</body>
+</html>

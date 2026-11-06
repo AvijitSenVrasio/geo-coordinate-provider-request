@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Timeline Histogram</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:32px 20px}
+h1{font-size:1.5rem;font-weight:700;background:linear-gradient(135deg,#6366f1,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
+.sub{font-size:.83rem;color:#64748b;margin-bottom:24px}
+.wrap{width:100%;max-width:1100px;display:flex;flex-direction:column;gap:18px}
+
+.ctrl{background:#1e2130;border:1px solid #2d3148;border-radius:14px;padding:18px 20px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:5px;min-width:140px;flex:1}
+.field label{font-size:.7rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.08em}
+select,input[type=date]{background:#0f1117;border:1px solid #2d3148;border-radius:8px;color:#e2e8f0;font-family:'Inter',sans-serif;font-size:.85rem;padding:9px 12px;outline:none;cursor:pointer;transition:border-color .2s;width:100%}
+select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px}
+select:focus,input:focus{border-color:#6366f1}
+select option{background:#1e2130}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.6)}
+
+.btn{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;border:none;border-radius:8px;padding:9px 22px;font-family:'Inter',sans-serif;font-size:.88rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:opacity .2s,transform .1s;align-self:flex-end}
+.btn:hover{opacity:.88;transform:translateY(-1px)}
+
+.status{font-size:.8rem;color:#64748b;min-height:18px;display:flex;align-items:center;gap:8px}
+.spin{width:13px;height:13px;border:2px solid #2d3148;border-top-color:#6366f1;border-radius:50%;animation:sp .7s linear infinite;display:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+.err{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:10px;padding:12px 16px;font-size:.84rem;display:none}
+
+.city-card{background:#1e2130;border:1px solid #2d3148;border-radius:14px;padding:24px;animation:fi .3s ease}
+@keyframes fi{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.city-title{font-size:1.1rem;font-weight:700;margin-bottom:4px}
+.city-sub{font-size:.78rem;color:#64748b;margin-bottom:18px}
+
+.provider-block{margin-bottom:28px}
+.prov-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.prov-dot{width:10px;height:10px;border-radius:50%}
+.prov-name{font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.prov-meta{font-size:.75rem;color:#64748b}
+canvas{max-height:220px;margin-bottom:8px}
+
+.blegend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px}
+.bi{display:flex;align-items:center;gap:5px;font-size:.73rem;color:#94a3b8}
+.bs{width:10px;height:10px;border-radius:2px}
+</style>
+</head>
+<body>
+<h1>Timeline Histogram</h1>
+<p class="sub">Response time distribution over time — per provider</p>
+
+<div class="wrap">
+  <div class="ctrl">
+    <div class="field"><label>City</label>
+      <select id="citySelect" onchange="fetchData()"><option value="">Loading…</option></select>
+    </div>
+    <div class="field"><label>Provider</label>
+      <select id="providerSelect" onchange="fetchData()">
+        <option value="">All Providers</option>
+        <option value="dida">DIDA</option>
+        <option value="hb">HB</option>
+        <option value="tbo">TBO</option>
+      </select>
+    </div>
+    <div class="field"><label>Start Date</label><input type="date" id="startDate"/></div>
+    <div class="field"><label>End Date</label><input type="date" id="endDate"/></div>
+    <div class="field"><label>Time Slot</label>
+      <select id="slotSelect" onchange="fetchData()">
+        <option value="3h">3 Hours</option>
+        <option value="6h" selected>6 Hours</option>
+        <option value="12h">12 Hours</option>
+        <option value="18h">18 Hours</option>
+      </select>
+    </div>
+    <button class="btn" onclick="fetchData()">⟳ Refresh</button>
+  </div>
+
+  <div class="status"><div class="spin" id="spin"></div><span id="statusTxt"></span></div>
+  <div class="err" id="errBox"></div>
+  <div id="root"></div>
+</div>
+
+<script>
+const BASE = 'https://staging.vrasio.com/vrasio-hotel';
+
+const PC = {
+  dida:{solid:'#6366f1',light:'rgba(99,102,241,.75)',dot:'#6366f1'},
+  hb:  {solid:'#10b981',light:'rgba(16,185,129,.75)', dot:'#10b981'},
+  tbo: {solid:'#f59e0b',light:'rgba(245,158,11,.75)', dot:'#f59e0b'},
+};
+function pc(n){return PC[n.toLowerCase()]||{solid:'#a78bfa',light:'rgba(167,139,250,.75)',dot:'#a78bfa'}}
+
+// Bucket palette (warm gradient: fast=green, slow=red)
+const BCOLORS = [
+  'rgba(34,197,94,.8)',   // 0–500
+  'rgba(132,204,22,.8)',  // 500–1000
+  'rgba(234,179,8,.8)',   // 1000–2000
+  'rgba(249,115,22,.8)',  // 2000–4000
+  'rgba(239,68,68,.8)',   // 4000–8000
+  'rgba(153,27,27,.8)',   // 8000+
+];
+const BSOLID = ['#22c55e','#84cc16','#eab308','#f97316','#ef4444','#991b1b'];
+
+let charts = [];
+
+function today(){ return new Date().toISOString().slice(0,10); }
+
+function setDates(){
+  const t = today();
+  document.getElementById('startDate').value = t;
+  document.getElementById('endDate').value   = t;
+}
+
+function loading(on, msg){
+  document.getElementById('spin').style.display = on ? 'block' : 'none';
+  document.getElementById('statusTxt').textContent = msg || '';
+}
+function showErr(m){ const b=document.getElementById('errBox'); b.textContent='Error: '+m; b.style.display='block'; }
+function hideErr(){ document.getElementById('errBox').style.display='none'; }
+
+function fmtSlot(iso){
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-GB',{month:'short',day:'numeric'})
+       + ' ' + String(d.getUTCHours()).padStart(2,'0')+':00';
+}
+
+async function loadCities(){
+  try{
+    const r = await fetch(`${BASE}/analyze/cities`);
+    const j = await r.json();
+    let cities = j.data ?? j;
+    if(!Array.isArray(cities)) throw new Error('bad format');
+    const sel = document.getElementById('citySelect');
+    sel.innerHTML = '';
+    cities.forEach(c => {
+      const v = typeof c === 'string' ? c : (c.city||c.name);
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      sel.appendChild(o);
+    });
+    if(cities.length){ sel.selectedIndex=0; fetchData(); }
+  }catch(e){ showErr('Cities: '+e.message); }
+}
+
+async function fetchData(){
+  hideErr();
+  charts.forEach(c=>c.destroy()); charts=[];
+  document.getElementById('root').innerHTML='';
+
+  const city     = document.getElementById('citySelect').value;
+  const provider = document.getElementById('providerSelect').value;
+  const start    = document.getElementById('startDate').value;
+  const end      = document.getElementById('endDate').value;
+  const slot     = document.getElementById('slotSelect').value;
+
+  if(!city||!start||!end) return;
+
+  const startISO = start+'T00:00:00Z';
+  const endISO   = end  +'T23:59:59Z';
+
+  let url = `${BASE}/analyze/histogram/timeline?city=${encodeURIComponent(city)}&start_date=${encodeURIComponent(startISO)}&end_date=${encodeURIComponent(endISO)}&slot=${slot}`;
+  if(provider) url += `&provider=${encodeURIComponent(provider)}`;
+
+  loading(true,'Fetching…');
+  try{
+    const r = await fetch(url);
+    const j = await r.json();
+    if(!j.status) throw new Error(j.message||'API error');
+    loading(false, 'Loaded · '+new Date().toLocaleTimeString());
+    if(Array.isArray(j.data) && j.data.length){
+      j.data.forEach(renderCity);
+    } else {
+      document.getElementById('root').innerHTML='<div style="color:#475569;text-align:center;padding:40px">No data for selected filters.</div>';
+    }
+  }catch(e){
+    loading(false);
+    showErr(e.message);
+  }
+}
+
+function renderCity(cityObj){
+  const root = document.getElementById('root');
+  const card = document.createElement('div');
+  card.className = 'city-card';
+
+  const providers = Object.entries(cityObj.providers);
+  // collect all unique bucket labels from first provider first slot
+  let bucketLabels = [];
+  if(providers.length && providers[0][1].slots?.length){
+    bucketLabels = providers[0][1].slots[0].buckets.map(b=>b.range_ms);
+  }
+
+  let provHTML = '';
+  const canvasIds = [];
+  providers.forEach(([name, pdata])=>{
+    const cid = 'c-'+Math.random().toString(36).slice(2);
+    canvasIds.push({id:cid, name, pdata});
+    const col = pc(name);
+    provHTML += `
+      <div class="provider-block">
+        <div class="prov-header">
+          <div class="prov-dot" style="background:${col.dot}"></div>
+          <div class="prov-name" style="color:${col.dot}">${name.toUpperCase()}</div>
+          <div class="prov-meta">· ${pdata.total_record} total requests</div>
+        </div>
+        <canvas id="${cid}"></canvas>
+      </div>`;
+  });
+
+  // Bucket legend
+  const legendHTML = bucketLabels.map((lbl,i)=>
+    `<div class="bi"><div class="bs" style="background:${BSOLID[i]||'#a78bfa'}"></div>${lbl}ms</div>`
+  ).join('');
+
+  card.innerHTML = `
+    <div class="city-title">${cityObj.city}</div>
+    <div class="city-sub">${cityObj.country||''}</div>
+    ${provHTML}
+    <div class="blegend">${legendHTML}</div>`;
+  root.appendChild(card);
+
+  // Render charts after DOM insert
+  canvasIds.forEach(({id, name, pdata})=>{
+    const slots = pdata.slots || [];
+    const col   = pc(name);
+
+    // X labels = slot_start formatted
+    const labels = slots.map(s => fmtSlot(s.slot_start));
+
+    // One dataset per bucket (stacked)
+    const buckets0 = slots[0]?.buckets || [];
+    const datasets = buckets0.map((bkt, bi)=>({
+      label: bkt.range_ms,
+      data:  slots.map(s => s.buckets[bi]?.count || 0),
+      backgroundColor: BCOLORS[bi] || 'rgba(167,139,250,.8)',
+      borderColor:     BSOLID[bi]  || '#a78bfa',
+      borderWidth: 1,
+      borderRadius: 3,
+      stack: 'stack',
+    }));
+
+    const ctx = document.getElementById(id).getContext('2d');
+    const inst = new Chart(ctx,{
+      type:'bar',
+      data:{ labels, datasets },
+      options:{
+        responsive:true,
+        plugins:{
+          legend:{ display:false },
+          tooltip:{
+            backgroundColor:'#1e2130', borderColor:'#2d3148', borderWidth:1,
+            titleColor:'#e2e8f0', bodyColor:'#94a3b8',
+            callbacks:{
+              title: items => {
+                const s = slots[items[0].dataIndex];
+                return fmtSlot(s.slot_start)+' → '+fmtSlot(s.slot_end);
+              },
+              label: ctx => ` ${ctx.dataset.label}ms: ${ctx.parsed.y} req`
+            }
+          }
+        },
+        scales:{
+          x:{ stacked:true, ticks:{color:'#64748b',font:{size:10},maxRotation:45}, grid:{color:'rgba(255,255,255,.04)'} },
+          y:{ stacked:true, ticks:{color:'#64748b',font:{size:11}}, grid:{color:'rgba(255,255,255,.04)'},
+              title:{display:true,text:'Request Count',color:'#475569',font:{size:10}} }
+        }
+      }
+    });
+    charts.push(inst);
+  });
+}
+
+window.onload = ()=>{ setDates(); loadCities(); };
+
+// Fetch on date change
+document.addEventListener('DOMContentLoaded',()=>{
+  document.getElementById('startDate').addEventListener('change', fetchData);
+  document.getElementById('endDate').addEventListener('change', fetchData);
+});
+</script>
+</body>
+</html>

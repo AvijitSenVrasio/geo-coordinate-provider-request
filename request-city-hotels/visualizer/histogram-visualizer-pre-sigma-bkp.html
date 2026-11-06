@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Histogram Visualizer</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+    .subtitle { font-size: 0.85rem; color: #64748b; margin-bottom: 28px; }
+    .container { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 20px; }
+
+    /* Controls bar */
+    .controls-bar {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 18px 22px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 180px; }
+    .field label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    select {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.88rem;
+      padding: 10px 14px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 34px;
+    }
+    select:focus { border-color: #6366f1; }
+    select option { background: #1e2130; }
+
+    /* Status */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.82rem;
+      color: #64748b;
+      min-height: 20px;
+    }
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid #2d3148;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Error */
+    .error {
+      background: rgba(239,68,68,0.12);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #f87171;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      display: none;
+    }
+
+    /* City card */
+    .city-card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 28px 24px;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .city-header { margin-bottom: 20px; }
+    .city-title { font-size: 1.15rem; font-weight: 700; color: #e2e8f0; }
+    .city-country { font-size: 0.8rem; color: #64748b; margin-top: 3px; }
+
+    /* Provider pills */
+    .provider-stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+    .provider-pill {
+      display: flex; align-items: center; gap: 10px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 10px 16px;
+    }
+    .pill-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .pill-name { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+    .pill-divider { width: 1px; height: 24px; background: #2d3148; }
+    .pill-stat { text-align: center; }
+    .pill-stat .val { font-size: 1rem; font-weight: 700; }
+    .pill-stat .lbl { font-size: 0.65rem; color: #64748b; margin-top: 1px; }
+
+    canvas { max-height: 360px; }
+
+    /* Legend */
+    .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; justify-content: center; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: #94a3b8; }
+    .legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+
+    /* Empty state */
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #475569;
+      font-size: 0.9rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Histogram Visualizer</h1>
+<p class="subtitle">Live data from API — select city & provider to explore</p>
+
+<div class="container">
+  <div class="controls-bar">
+    <div class="field">
+      <label>City</label>
+      <select id="citySelect" onchange="onCityChange()">
+        <option value="">Loading cities...</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Provider</label>
+      <select id="providerSelect" onchange="onProviderChange()">
+        <option value="">All Providers</option>
+        <option value="dida">DIDA</option>
+        <option value="hb">HB</option>
+        <option value="tbo">TBO</option>
+      </select>
+    </div>
+    <div class="status-bar">
+      <div class="spinner" id="spinner"></div>
+      <span id="statusText"></span>
+    </div>
+  </div>
+
+  <div class="error" id="errorBox"></div>
+  <div id="chartsRoot"></div>
+  <div class="empty" id="emptyState">Select a city to load the histogram</div>
+</div>
+
+<script>
+  const BASE = 'https://staging.vrasio.com/vrasio-hotel';
+
+  const PROVIDER_COLORS = {
+    dida: { solid: '#6366f1', light: 'rgba(99,102,241,0.70)',  dot: '#6366f1' },
+    hb:   { solid: '#10b981', light: 'rgba(16,185,129,0.70)',  dot: '#10b981' },
+    tbo:  { solid: '#f59e0b', light: 'rgba(245,158,11,0.70)',  dot: '#f59e0b' },
+  };
+  function colorFor(name) {
+    return PROVIDER_COLORS[name.toLowerCase()] ?? { solid: '#a78bfa', light: 'rgba(167,139,250,0.70)', dot: '#a78bfa' };
+  }
+
+  let chartInstances = [];
+
+  function setLoading(on, msg) {
+    document.getElementById('spinner').style.display = on ? 'block' : 'none';
+    document.getElementById('statusText').textContent = msg || '';
+  }
+
+  function showError(msg) {
+    const b = document.getElementById('errorBox');
+    b.textContent = 'Error: ' + msg;
+    b.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('errorBox').style.display = 'none';
+  }
+
+  function peakBucket(buckets) {
+    return buckets.reduce((a, b) => b.count > a.count ? b : a, { count: -1, range_ms: '-' });
+  }
+
+  // ── Load cities ────────────────────────────────────────────────────────────
+  async function loadCities() {
+    setLoading(true, 'Loading cities...');
+    try {
+      const res  = await fetch(`${BASE}/analyze/cities`);
+      const json = await res.json();
+
+      // Accept: { data: ["Orlando", ...] } or { data: [{city,country}, ...] } or array
+      let cities = json.data ?? json;
+      if (!Array.isArray(cities)) throw new Error('Unexpected city list format');
+
+      const sel = document.getElementById('citySelect');
+      sel.innerHTML = '';
+
+      cities.forEach((c, i) => {
+        const opt   = document.createElement('option');
+        const label = typeof c === 'string' ? c : (c.city || c.name || JSON.stringify(c));
+        const value = typeof c === 'string' ? c : (c.city || c.name);
+        opt.value   = value;
+        opt.textContent = label;
+        sel.appendChild(opt);
+      });
+
+      setLoading(false, cities.length + ' cities loaded');
+
+      // Auto-select first city
+      if (cities.length > 0) {
+        sel.selectedIndex = 0;
+        fetchHistogram();
+      }
+    } catch (e) {
+      setLoading(false);
+      showError('Failed to load cities: ' + e.message);
+    }
+  }
+
+  // ── Fetch histogram ────────────────────────────────────────────────────────
+  async function fetchHistogram() {
+    hideError();
+    const city     = document.getElementById('citySelect').value;
+    const provider = document.getElementById('providerSelect').value;
+
+    if (!city) return;
+
+    let url = `${BASE}/analyze/histogram?city=${encodeURIComponent(city)}`;
+    if (provider) url += `&provider=${encodeURIComponent(provider)}`;
+
+    setLoading(true, 'Fetching data...');
+    chartInstances.forEach(c => c.destroy());
+    chartInstances = [];
+    document.getElementById('chartsRoot').innerHTML = '';
+    document.getElementById('emptyState').style.display = 'none';
+
+    try {
+      const res  = await fetch(url);
+      const json = await res.json();
+
+      if (!json.status) throw new Error(json.message || 'API returned error');
+
+      setLoading(false, 'Loaded');
+
+      if (Array.isArray(json.data) && json.data.length > 0) {
+        json.data.forEach(cityObj => renderCityCard(cityObj));
+      } else {
+        document.getElementById('emptyState').style.display = 'block';
+        document.getElementById('emptyState').textContent = 'No data for selected filters.';
+      }
+    } catch (e) {
+      setLoading(false);
+      showError('Fetch failed: ' + e.message);
+    }
+  }
+
+  function onCityChange()    { fetchHistogram(); }
+  function onProviderChange(){ fetchHistogram(); }
+
+  // ── Render city card ───────────────────────────────────────────────────────
+  function renderCityCard(cityObj) {
+    const root     = document.getElementById('chartsRoot');
+    const card     = document.createElement('div');
+    card.className = 'city-card';
+
+    const providers = Object.entries(cityObj.providers);
+    const labels    = providers[0][1].buckets.map(b => b.range_ms);
+
+    const datasets = providers.map(([name, pdata]) => {
+      const col = colorFor(name);
+      return {
+        label:           name.toUpperCase(),
+        data:            pdata.buckets.map(b => b.count),
+        backgroundColor: col.light,
+        borderColor:     col.solid,
+        borderWidth:     1.5,
+        borderRadius:    5,
+      };
+    });
+
+    const pillsHTML = providers.map(([name, pdata]) => {
+      const col  = colorFor(name);
+      const peak = peakBucket(pdata.buckets);
+      const pct  = pdata.total_record > 0 ? ((peak.count / pdata.total_record) * 100).toFixed(1) : '0.0';
+      return `
+        <div class="provider-pill">
+          <div class="pill-dot" style="background:${col.dot}"></div>
+          <div class="pill-name" style="color:${col.dot}">${name.toUpperCase()}</div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${pdata.total_record}</div><div class="lbl">Total Req</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${peak.range_ms}</div><div class="lbl">Peak</div></div>
+          <div class="pill-divider"></div>
+          <div class="pill-stat"><div class="val" style="color:${col.dot}">${pct}%</div><div class="lbl">Peak Share</div></div>
+        </div>`;
+    }).join('');
+
+    const legendHTML = providers.map(([name]) => {
+      const col = colorFor(name);
+      return `<div class="legend-item"><div class="legend-swatch" style="background:${col.solid}"></div>${name.toUpperCase()}</div>`;
+    }).join('');
+
+    const canvasId = 'chart-' + Math.random().toString(36).slice(2);
+    card.innerHTML = `
+      <div class="city-header">
+        <div class="city-title">${cityObj.city}</div>
+        <div class="city-country">${cityObj.country || ''}</div>
+      </div>
+      <div class="provider-stats">${pillsHTML}</div>
+      <canvas id="${canvasId}"></canvas>
+      <div class="legend">${legendHTML}</div>`;
+    root.appendChild(card);
+
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    const instance = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e2130', borderColor: '#2d3148', borderWidth: 1,
+            titleColor: '#e2e8f0', bodyColor: '#94a3b8',
+            callbacks: {
+              label: function(ctx) {
+                const key   = ctx.dataset.label.toLowerCase();
+                const total = cityObj.providers[key]?.total_record || 1;
+                const pct   = ((ctx.parsed.y / total) * 100).toFixed(1);
+                return ` ${ctx.dataset.label}: ${ctx.parsed.y} req  (${pct}%)`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            title: { display: true, text: 'Response Time (ms)', color: '#475569', font: { size: 11 } }
+          },
+          y: {
+            ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            title: { display: true, text: 'Request Count', color: '#475569', font: { size: 11 } }
+          }
+        }
+      }
+    });
+    chartInstances.push(instance);
+  }
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  window.onload = loadCities;
+</script>
+</body>
+</html>

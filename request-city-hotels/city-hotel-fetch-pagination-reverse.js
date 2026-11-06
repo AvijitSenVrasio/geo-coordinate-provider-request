@@ -44,6 +44,12 @@ const RETRY_FAILED =
     String(process.env.RETRY_FAILED || "").toLowerCase() === "true" ||
     process.argv.includes("--retry-failed");
 
+// Pass --target (or TARGET_ONLY=true) to only process city_hotel_list
+// documents that have target: 1 instead of every city.
+const TARGET_ONLY =
+    String(process.env.TARGET_ONLY || "").toLowerCase() === "true" ||
+    process.argv.includes("--target");
+
 const DEFAULT_PAYLOAD = {
     radius: 10,
     checkIn: "2026-12-15",
@@ -656,6 +662,7 @@ async function main() {
         console.log(`Connected to MongoDB: ${DB_NAME}`);
         console.log(`Target API URL: ${API_URL}`);
         console.log(`Batch size: ${BATCH_SIZE} cities`);
+        console.log(`Target-only mode: ${TARGET_ONLY ? "ON (target: 1)" : "OFF"}`);
         console.log("Concurrency: 1 (sequential requests)");
         console.log(`Request timeout: ${REQUEST_TIMEOUT_MS} ms`);
         console.log(
@@ -694,6 +701,7 @@ async function main() {
             if (RETRY_FAILED && retryCursor) {
                 filter._id = { $gt: retryCursor };
             }
+            if (TARGET_ONLY) filter.target = 1;
 
             const cities = await cityCollection
                 .find(filter)

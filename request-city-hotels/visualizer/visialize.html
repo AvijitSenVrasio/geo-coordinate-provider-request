@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Histogram Visualizer</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: #64748b;
+      margin-bottom: 32px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 860px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .input-area {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 20px;
+    }
+
+    .input-area label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 180px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      color: #a5f3fc;
+      font-family: 'Fira Code', 'Courier New', monospace;
+      font-size: 0.82rem;
+      padding: 14px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    textarea:focus { border-color: #6366f1; }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .controls input[type="text"] {
+      flex: 1;
+      min-width: 140px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.85rem;
+      padding: 10px 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .controls input[type="text"]:focus { border-color: #6366f1; }
+    .controls input::placeholder { color: #475569; }
+
+    button {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 24px;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+
+    button:hover { opacity: 0.88; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+
+    .btn-secondary {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      color: #94a3b8;
+    }
+
+    .error {
+      background: rgba(239,68,68,0.12);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #f87171;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      display: none;
+    }
+
+    .chart-card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 14px;
+      padding: 28px 24px;
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .chart-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    .chart-title span {
+      font-size: 0.8rem;
+      font-weight: 400;
+      color: #64748b;
+      display: block;
+      margin-top: 2px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 8px 14px;
+      text-align: center;
+    }
+
+    .stat .val {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #a78bfa;
+    }
+
+    .stat .lbl {
+      font-size: 0.7rem;
+      color: #64748b;
+      margin-top: 2px;
+    }
+
+    canvas { max-height: 340px; }
+  </style>
+</head>
+<body>
+
+  <h1>Histogram Visualizer</h1>
+  <p class="subtitle">Paste your raw API response — chart renders instantly</p>
+
+  <div class="container">
+    <div class="input-area">
+      <label>Paste API Response (JSON)</label>
+      <textarea id="jsonInput" placeholder='{
+  "status": true,
+  "message": "Histogram buckets computed",
+  "data": [
+    { "range_ms": "500-1000", "count": 1 },
+    ...
+  ]
+}'></textarea>
+
+      <div class="controls" style="margin-top: 14px;">
+        <input type="text" id="chartTitle" placeholder="Chart title (e.g. Tokyo - Dida)" />
+        <button onclick="renderChart()">Render Chart</button>
+        <button class="btn-secondary" onclick="loadExample()">Load Example</button>
+      </div>
+    </div>
+
+    <div class="error" id="errorBox"></div>
+
+    <div class="chart-card" id="chartCard">
+      <div class="chart-header">
+        <div class="chart-title" id="chartLabel">
+          Response Time Distribution
+          <span id="chartSubtitle"></span>
+        </div>
+        <div class="stats" id="statsBox"></div>
+      </div>
+      <canvas id="myChart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    let chartInstance = null;
+
+    const EXAMPLE = {
+      status: true,
+      message: "Histogram buckets computed",
+      data: [
+        { range_ms: "500-1000",  count: 1  },
+        { range_ms: "1000-2000", count: 21 },
+        { range_ms: "2000-4000", count: 81 },
+        { range_ms: "4000-8000", count: 39 },
+        { range_ms: "8000+",     count: 1  }
+      ]
+    };
+
+    function loadExample() {
+      document.getElementById('jsonInput').value = JSON.stringify(EXAMPLE, null, 2);
+      document.getElementById('chartTitle').value = 'Tokyo - Dida';
+    }
+
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = 'Error: ' + msg;
+      box.style.display = 'block';
+    }
+
+    function hideError() {
+      document.getElementById('errorBox').style.display = 'none';
+    }
+
+    function renderChart() {
+      hideError();
+      const raw = document.getElementById('jsonInput').value.trim();
+      let parsed;
+
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        showError('Invalid JSON - ' + e.message);
+        return;
+      }
+
+      const data = parsed.data ?? parsed;
+      if (!Array.isArray(data) || !data[0]?.range_ms || data[0]?.count === undefined) {
+        showError('Expected { data: [{ range_ms, count }, ...] } format.');
+        return;
+      }
+
+      const labels = data.map(d => d.range_ms);
+      const counts = data.map(d => d.count);
+      const total  = counts.reduce((a, b) => a + b, 0);
+      const peak   = data.reduce((a, b) => b.count > a.count ? b : a);
+      const maxCount = Math.max(...counts);
+
+      const statsBox = document.getElementById('statsBox');
+      statsBox.innerHTML =
+        '<div class="stat"><div class="val">' + total + '</div><div class="lbl">Total Requests</div></div>' +
+        '<div class="stat"><div class="val">' + peak.range_ms + '</div><div class="lbl">Peak Bucket</div></div>' +
+        '<div class="stat"><div class="val">' + ((peak.count/total)*100).toFixed(1) + '%</div><div class="lbl">Peak Share</div></div>';
+
+      const title = document.getElementById('chartTitle').value || 'Response Time Distribution';
+      const labelNode = document.getElementById('chartLabel');
+      labelNode.childNodes[0].textContent = title;
+      document.getElementById('chartSubtitle').textContent =
+        total + ' total requests - peak at ' + peak.range_ms + 'ms';
+
+      if (chartInstance) chartInstance.destroy();
+
+      const ctx = document.getElementById('myChart').getContext('2d');
+      chartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Requests',
+            data: counts,
+            backgroundColor: counts.map(c =>
+              c === maxCount ? 'rgba(167,139,250,0.85)' : 'rgba(99,102,241,0.55)'
+            ),
+            borderColor: counts.map(c =>
+              c === maxCount ? '#a78bfa' : '#6366f1'
+            ),
+            borderWidth: 1.5,
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1e2130',
+              borderColor: '#2d3148',
+              borderWidth: 1,
+              titleColor: '#e2e8f0',
+              bodyColor: '#94a3b8',
+              callbacks: {
+                label: function(ctx) {
+                  return ' ' + ctx.parsed.y + ' requests  (' + ((ctx.parsed.y/total)*100).toFixed(1) + '%)';
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+              grid:  { color: 'rgba(255,255,255,0.04)' },
+              title: {
+                display: true,
+                text: 'Response Time (ms)',
+                color: '#475569',
+                font: { size: 11 }
+              }
+            },
+            y: {
+              ticks: { color: '#64748b', font: { family: 'Inter', size: 12 } },
+              grid:  { color: 'rgba(255,255,255,0.04)' },
+              title: {
+                display: true,
+                text: 'Request Count',
+                color: '#475569',
+                font: { size: 11 }
+              }
+            }
+          }
+        }
+      });
+
+      document.getElementById('chartCard').style.display = 'block';
+    }
+
+    window.onload = function() {
+      loadExample();
+      renderChart();
+    };
+  </script>
+</body>
+</html>
+
